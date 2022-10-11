@@ -1,3 +1,16 @@
 export interface YandexAdsPlugin {
-  echo(options: { value: string }): Promise<{ value: string }>;
+
+  initInter(options: { id: string  }): Promise<{}>;
+  initReward(options: { id: string  }): Promise<{}>;
+  initBanner(options: { id: string  }): Promise<{}>;
+
+	loadBanner(): Promise<any> ;
+
+	showBanner(): Promise<any> ;
+
+	hideBanner(): Promise<any> ;
+
+	showAds(): Promise<any> ;
+
+	showReward(): Promise<{result:boolean}>;
 }
