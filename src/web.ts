@@ -1,7 +1,6 @@
 import { WebPlugin } from '@capacitor/core';
 
 import type {
-  YandexAdsPlugin,
   InitOptions,
   AdResult,
   LoadBannerOptions,
@@ -10,7 +9,7 @@ import type {
   RewardedAdResult,
 } from './definitions';
 
-export class YandexAdsWeb extends WebPlugin implements YandexAdsPlugin {
+export class YandexAdsWeb extends WebPlugin {
   async init(_options?: InitOptions): Promise<AdResult> {
     console.warn('YandexAds: init() is not available on web platform');
     return { success: false, message: 'Not available on web' };
