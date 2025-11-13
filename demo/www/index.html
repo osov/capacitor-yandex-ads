@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>Yandex Ads Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            padding-top: env(safe-area-inset-top);
+            padding-bottom: env(safe-area-inset-bottom);
+        }
+
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 8px;
+        }
+
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .status {
+            background: white;
+            border-radius: 16px;
+            padding: 16px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .status-item:last-child {
+            border-bottom: none;
+        }
+
+        .status-label {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .status-value {
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .status-value.success {
+            color: #10b981;
+        }
+
+        .status-value.error {
+            color: #ef4444;
+        }
+
+        .status-value.warning {
+            color: #f59e0b;
+        }
+
+        .section {
+            background: white;
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .section-icon {
+            font-size: 24px;
+        }
+
+        .button-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            padding: 14px 20px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            touch-action: manipulation;
+        }
+
+        .button:active {
+            transform: scale(0.95);
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+        }
+
+        .button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .button.primary {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        }
+
+        .button.secondary {
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+        }
+
+        .button.danger {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+        }
+
+        .button.full-width {
+            grid-column: 1 / -1;
+        }
+
+        .input-group {
+            margin-bottom: 12px;
+        }
+
+        .input-label {
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            color: #666;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+        }
+
+        .input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+
+        .input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 14px;
+            background: white;
+            cursor: pointer;
+        }
+
+        .log-container {
+            background: white;
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .log-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .log-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .log-clear {
+            background: #ef4444;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .log-entries {
+            background: #1e1e1e;
+            border-radius: 8px;
+            padding: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            padding: 4px 0;
+            border-bottom: 1px solid #333;
+            word-wrap: break-word;
+        }
+
+        .log-entry:last-child {
+            border-bottom: none;
+        }
+
+        .log-entry.info {
+            color: #60a5fa;
+        }
+
+        .log-entry.success {
+            color: #34d399;
+        }
+
+        .log-entry.error {
+            color: #f87171;
+        }
+
+        .log-entry.warning {
+            color: #fbbf24;
+        }
+
+        .log-time {
+            color: #9ca3af;
+            margin-right: 8px;
+        }
+
+        .ad-unit-ids {
+            background: #f9fafb;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 12px;
+            font-size: 12px;
+        }
+
+        .ad-unit-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            color: #666;
+        }
+
+        .ad-unit-id {
+            font-family: monospace;
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        @media (max-width: 480px) {
+            .button-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🎯 Yandex Ads Demo</h1>
+            <p class="subtitle">Test capacitor-yandex-ads plugin</p>
+        </div>
+
+        <!-- Status -->
+        <div class="status">
+            <div class="status-item">
+                <span class="status-label">SDK Status:</span>
+                <span class="status-value" id="sdk-status">Not Initialized</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Banner:</span>
+                <span class="status-value" id="banner-status">Not Loaded</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Interstitial:</span>
+                <span class="status-value" id="interstitial-status">Not Loaded</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Rewarded:</span>
+                <span class="status-value" id="rewarded-status">Not Loaded</span>
+            </div>
+        </div>
+
+        <!-- Initialization -->
+        <div class="section">
+            <div class="section-title">
+                <span class="section-icon">⚙️</span>
+                Initialization
+            </div>
+            <button class="button primary full-width" id="btn-init">Initialize SDK</button>
+        </div>
+
+        <!-- Banner Ads -->
+        <div class="section">
+            <div class="section-title">
+                <span class="section-icon">📱</span>
+                Banner Ads
+            </div>
+            <div class="input-group">
+                <label class="input-label">Ad Unit ID</label>
+                <input type="text" class="input" id="banner-unit-id" value="demo-banner-yandex" placeholder="Ad Unit ID">
+            </div>
+            <div class="input-group">
+                <label class="input-label">Position</label>
+                <select class="select" id="banner-position">
+                    <option value="bottom">Bottom</option>
+                    <option value="top">Top</option>
+                </select>
+            </div>
+            <div class="button-grid">
+                <button class="button secondary" id="btn-load-banner">Load Banner</button>
+                <button class="button secondary" id="btn-show-banner">Show Banner</button>
+                <button class="button secondary" id="btn-hide-banner">Hide Banner</button>
+                <button class="button danger" id="btn-destroy-banner">Destroy</button>
+            </div>
+        </div>
+
+        <!-- Interstitial Ads -->
+        <div class="section">
+            <div class="section-title">
+                <span class="section-icon">📺</span>
+                Interstitial Ads
+            </div>
+            <div class="input-group">
+                <label class="input-label">Ad Unit ID</label>
+                <input type="text" class="input" id="interstitial-unit-id" value="demo-interstitial-yandex" placeholder="Ad Unit ID">
+            </div>
+            <div class="button-grid">
+                <button class="button secondary" id="btn-load-interstitial">Load</button>
+                <button class="button primary" id="btn-show-interstitial">Show</button>
+            </div>
+        </div>
+
+        <!-- Rewarded Ads -->
+        <div class="section">
+            <div class="section-title">
+                <span class="section-icon">🎁</span>
+                Rewarded Ads
+            </div>
+            <div class="input-group">
+                <label class="input-label">Ad Unit ID</label>
+                <input type="text" class="input" id="rewarded-unit-id" value="demo-rewarded-yandex" placeholder="Ad Unit ID">
+            </div>
+            <div class="button-grid">
+                <button class="button secondary" id="btn-load-rewarded">Load</button>
+                <button class="button primary" id="btn-show-rewarded">Show</button>
+            </div>
+        </div>
+
+        <!-- Demo Ad Unit IDs -->
+        <div class="section">
+            <div class="section-title">
+                <span class="section-icon">📋</span>
+                Demo Ad Unit IDs
+            </div>
+            <div class="ad-unit-ids">
+                <div class="ad-unit-item">
+                    <span>Banner:</span>
+                    <span class="ad-unit-id">demo-banner-yandex</span>
+                </div>
+                <div class="ad-unit-item">
+                    <span>Interstitial:</span>
+                    <span class="ad-unit-id">demo-interstitial-yandex</span>
+                </div>
+                <div class="ad-unit-item">
+                    <span>Rewarded:</span>
+                    <span class="ad-unit-id">demo-rewarded-yandex</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Event Log -->
+        <div class="log-container">
+            <div class="log-header">
+                <span class="log-title">📜 Event Log</span>
+                <button class="log-clear" id="btn-clear-log">Clear</button>
+            </div>
+            <div class="log-entries" id="log-entries">
+                <div class="log-entry info">
+                    <span class="log-time">[00:00:00]</span>
+                    <span>App started. Initialize SDK to begin testing.</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+</body>
+</html>
