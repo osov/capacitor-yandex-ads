@@ -161,9 +161,18 @@ public class YandexAdsPlugin extends Plugin {
                 FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) bannerLayout.getLayoutParams();
                 if ("top".equalsIgnoreCase(position)) {
                     params.gravity = Gravity.CENTER_HORIZONTAL | Gravity.TOP;
+                    // Добавляем отступ под строку состояния
+                    int statusBarHeight = 0;
+                    int resourceId = activity.getResources().getIdentifier("status_bar_height", "dimen", "android");
+                    if (resourceId > 0) {
+                        statusBarHeight = activity.getResources().getDimensionPixelSize(resourceId);
+                    }
+                    params.topMargin = statusBarHeight;
                 } else {
+
                     params.gravity = Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM;
-                }
+
+                    params.topMargin = 0;
                 bannerLayout.setLayoutParams(params);
 
                 // Add to layout (initially hidden)
