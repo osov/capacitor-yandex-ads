@@ -17,8 +17,10 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, 'src')
-    }
+      '@': path.resolve(__dirname, 'src'),
+      '@capacitor/core': path.resolve(__dirname, 'node_modules/@capacitor/core')
+    },
+    dedupe: ['@capacitor/core']
   },
   server: {
     port: 3000
