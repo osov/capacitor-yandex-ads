@@ -7,12 +7,11 @@ export default defineConfig({
     outDir: 'www',
     emptyOutDir: false,
     rollupOptions: {
-      input: {
-        main: path.resolve(__dirname, 'src/app.ts')
-      },
+      input: path.resolve(__dirname, 'src/app.ts'),
       output: {
         entryFileNames: 'app.js',
-        format: 'es'
+        format: 'iife',
+        name: 'YandexAdsDemo'
       }
     }
   },

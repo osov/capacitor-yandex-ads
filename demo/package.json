@@ -4,7 +4,7 @@
   "description": "Demo app for capacitor-yandex-ads plugin",
   "main": "index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "vite build",
     "dev": "vite",
     "serve": "vite preview"
   },
