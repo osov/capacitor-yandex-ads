@@ -173,6 +173,7 @@ public class YandexAdsPlugin extends Plugin {
                     params.gravity = Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM;
 
                     params.topMargin = 0;
+                }
                 bannerLayout.setLayoutParams(params);
 
                 // Add to layout (initially hidden)
