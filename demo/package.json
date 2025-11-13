@@ -1,0 +1,25 @@
+{
+  "name": "yandex-ads-demo",
+  "version": "1.0.0",
+  "description": "Demo app for capacitor-yandex-ads plugin",
+  "main": "index.js",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "serve": "vite preview"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@capacitor/android": "^5.0.0",
+    "@capacitor/core": "^5.0.0",
+    "@capacitor/ios": "^5.0.0",
+    "@osov/capacitor-yandex-ads": "file:.."
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^5.0.0",
+    "typescript": "^5.0.0",
+    "vite": "^4.3.0"
+  }
+}

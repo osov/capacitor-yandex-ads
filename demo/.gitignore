@@ -1,0 +1,24 @@
+# Dependencies
+node_modules
+
+# Build
+www/app.js
+www/app.js.map
+dist
+
+# Capacitor
+android
+ios
+.capacitor
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
