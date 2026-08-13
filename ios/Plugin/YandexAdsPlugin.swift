@@ -97,12 +97,14 @@ public class YandexAdsPlugin: CAPPlugin {
             resolveFail(call, "Missing required parameter: adUnitId")
             return
         }
-        guard let sizeObj = call.getObject("size"), let width = sizeObj["width"] as? Int else {
+        // Через мост число приезжает как NSNumber: приведение к Int сорвалось бы
+        // на нецелом значении, тогда как Android его округляет. Берём NSNumber.
+        guard let sizeObj = call.getObject("size"), let width = (sizeObj["width"] as? NSNumber)?.intValue else {
             resolveFail(call, "Missing required parameter: size.width")
             return
         }
 
-        let height = sizeObj["height"] as? Int
+        let height = (sizeObj["height"] as? NSNumber)?.intValue
         bannerAdUnitId = adUnitId
         bannerPosition = call.getString("position") ?? "bottom"
 
@@ -226,6 +228,7 @@ public class YandexAdsPlugin: CAPPlugin {
 
         settleInterstitialShow(shown: false, message: "Superseded by a new showInterstitial() call")
         interstitialShowCallId = hold(call)
+        armShowWatchdog(callId: interstitialShowCallId, isRewarded: false)
 
         // @MainActor: InterstitialAd изолирован главным актором, простое
         // DispatchQueue.main.async этого компилятору не доказывает.
@@ -301,6 +304,7 @@ public class YandexAdsPlugin: CAPPlugin {
         // Награда прошлого показа не должна засчитаться этому.
         lastReward = nil
         rewardedShowCallId = hold(call)
+        armShowWatchdog(callId: rewardedShowCallId, isRewarded: true)
 
         DispatchQueue.main.async { @MainActor [weak self] in
             guard let self = self else { return }
@@ -375,6 +379,25 @@ public class YandexAdsPlugin: CAPPlugin {
         if let message = message { result["message"] = message }
         settle(&interstitialShowCallId, with: result)
     }
+
+    /// Закрывает обещание показа, если SDK так и не прислал колбэк. Сверяется с
+    /// идентификатором: к этому моменту мог начаться следующий показ.
+    private func armShowWatchdog(callId: String?, isRewarded: Bool) {
+        guard let callId = callId else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.showTimeout) { [weak self] in
+            guard let self = self else { return }
+            if isRewarded {
+                guard self.rewardedShowCallId == callId else { return }
+                // success=false: ролика по сути не было, попытку не сжигаем.
+                self.settleRewardedShow(shown: false, reward: nil, message: "Show timeout")
+            } else {
+                guard self.interstitialShowCallId == callId else { return }
+                self.settleInterstitialShow(shown: false, message: "Show timeout")
+            }
+        }
+    }
+
+    private static let showTimeout: TimeInterval = 5 * 60
 
     /// Отдаёт результат показа rewarded-ролика ровно один раз.
     ///

@@ -51,6 +51,9 @@ public class YandexAdsPlugin extends Plugin {
 
     // Инициализация не должна вешать вызов навсегда, если ответа нет.
     private static final long INIT_TIMEOUT_MS = 10000;
+    // Показ тоже: если SDK потеряет колбэк, обещание показа висело бы вечно, а
+    // вместе с ним - кнопка награды в игре.
+    private static final long SHOW_TIMEOUT_MS = 5 * 60 * 1000;
 
     // Методы плагина Capacitor выполняет на своём потоке, а колбэки SDK
     // приходят на UI-поток, поэтому всё разделяемое состояние - volatile.
@@ -382,6 +385,7 @@ public class YandexAdsPlugin extends Plugin {
         settleInterstitialShow(false, "Superseded by a new showInterstitial() call");
         final PluginCall showCall = hold(call);
         pendingInterstitialShowCall.set(showCall);
+        armShowWatchdog(pendingInterstitialShowCall, showCall, "interstitial");
 
         AppCompatActivity activity = getActivity();
         if (activity == null) {
@@ -527,6 +531,7 @@ public class YandexAdsPlugin extends Plugin {
         lastReward = null;
         final PluginCall showCall = hold(call);
         pendingRewardedShowCall.set(showCall);
+        armRewardedShowWatchdog(showCall);
 
         AppCompatActivity activity = getActivity();
         if (activity == null) {
@@ -766,6 +771,32 @@ public class YandexAdsPlugin extends Plugin {
         }
 
         release(call, ret);
+    }
+
+    /**
+     * Через SHOW_TIMEOUT_MS закрывает обещание показа, если колбэк так и не
+     * пришёл. Отвечает только своему вызову: к этому моменту мог начаться
+     * следующий показ.
+     */
+    private void armShowWatchdog(AtomicReference<PluginCall> holder, PluginCall call, String label) {
+        LinearLayout layout = bannerLayout;
+        if (layout == null) return;
+        layout.postDelayed(() -> {
+            if (holder.get() != call) return;
+            Log.w(TAG, label + ": не дождались колбэка показа");
+            settleOwnCall(holder, call, false, "Show timeout");
+        }, SHOW_TIMEOUT_MS);
+    }
+
+    private void armRewardedShowWatchdog(PluginCall call) {
+        LinearLayout layout = bannerLayout;
+        if (layout == null) return;
+        layout.postDelayed(() -> {
+            if (pendingRewardedShowCall.get() != call) return;
+            Log.w(TAG, "rewarded: не дождались колбэка показа");
+            // success=false: ролика по сути не было, попытку сжигать нельзя.
+            settleRewardedShow(call, false, null, "Show timeout");
+        }, SHOW_TIMEOUT_MS);
     }
 
     /** Удерживает вызов до прихода нативного колбэка. */
