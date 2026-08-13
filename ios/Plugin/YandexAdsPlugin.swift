@@ -55,7 +55,7 @@ public class YandexAdsPlugin: CAPPlugin {
     private var rewardedAdUnitId: String?
     private var rewardedLoadCallId: String?
     private var rewardedShowCallId: String?
-    private var lastReward: Reward?
+    private var lastRewardData: [String: Any]?
 
     // MARK: - SDK
 
@@ -88,6 +88,10 @@ public class YandexAdsPlugin: CAPPlugin {
                 guard let self = self else { return }
                 guard let index = self.pendingInitCalls.firstIndex(where: { $0 === call }) else { return }
                 self.pendingInitCalls.remove(at: index)
+                // Колбэка провала у initializeSDK нет, поэтому снимаем признак
+                // сами: иначе следующий init() не дошёл бы до SDK вовсе и
+                // реклама осталась бы выключенной до перезапуска.
+                if self.pendingInitCalls.isEmpty { self.isInitializing = false }
                 // Событие с тем же составом, что на Android: поле error в
                 // AdFailedToLoadEvent объявлено обязательным.
                 self.notifyAdEvent(adType: "init", event: "failed_to_load", adUnitId: nil,
@@ -340,8 +344,9 @@ public class YandexAdsPlugin: CAPPlugin {
 
             self.rewardedAdUnitId = adUnitId
             self.rewardedAd = nil
-            // lastReward относится к показываемому ролику и здесь не трогается:
-            // сброс стёр бы уже выданную награду, если грузить во время показа.
+            // lastRewardData относится к показываемому ролику и здесь не
+            // трогается: сброс стёр бы уже выданную награду, если грузить во
+            // время показа.
 
             self.settle(&self.rewardedLoadCallId,
                         with: ["success": false, "message": "Superseded by a new loadRewarded() call"])
@@ -396,7 +401,7 @@ public class YandexAdsPlugin: CAPPlugin {
             }
 
             // Награда прошлого показа не должна засчитаться этому.
-            self.lastReward = nil
+            self.lastRewardData = nil
             self.rewardedAd = nil
             self.showingRewardedAd = ad
             self.rewardedShowCallId = heldId
@@ -419,7 +424,7 @@ public class YandexAdsPlugin: CAPPlugin {
             guard let self = self else { return }
             self.rewardedAd = nil
             self.showingRewardedAd = nil
-            self.lastReward = nil
+            self.lastRewardData = nil
             self.settleRewardedShow(shown: false, reward: nil, message: "Rewarded ad destroyed")
             call.resolve(["success": true])
         }
@@ -502,8 +507,8 @@ public class YandexAdsPlugin: CAPPlugin {
             self.showingRewardedAd = nil
             // Награда могла прийти до того, как ролик потерялся, - тогда показ
             // состоялся и попытку надо засчитать.
-            let reward = self.lastReward
-            self.lastReward = nil
+            let reward = self.lastRewardData
+            self.lastRewardData = nil
             self.settleRewardedShow(shown: reward != nil, reward: reward, message: "Show timeout")
         }
     }
@@ -514,15 +519,12 @@ public class YandexAdsPlugin: CAPPlugin {
     ///
     /// shown=false означает "ролик не показали" - попытку сжигать нельзя;
     /// shown=true с rewarded=false означает "показали, но игрок прервал".
-    private func settleRewardedShow(shown: Bool, reward: Reward?, message: String?) {
+    private func settleRewardedShow(shown: Bool, reward: [String: Any]?, message: String?) {
         var result: [String: Any] = ["success": shown]
         if let message = message { result["message"] = message }
         if shown {
             result["rewarded"] = reward != nil
-            if let reward = reward {
-                let rewardData: [String: Any] = ["amount": reward.amount, "type": reward.type]
-                result["reward"] = rewardData
-            }
+            if let reward = reward { result["reward"] = reward }
         }
         settle(&rewardedShowCallId, with: result)
     }
@@ -643,11 +645,13 @@ extension YandexAdsPlugin: RewardedAdDelegate {
     }
 
     public func rewardedAd(_ rewardedAd: RewardedAd, didReward reward: Reward) {
-        // Награда может прийти и после закрытия ролика: поле уже обнулено, но
-        // обещание ещё ждёт - сверяемся с ним, иначе награда потерялась бы.
-        guard rewardedAd === showingRewardedAd || rewardedShowCallId != nil else { return }
-        lastReward = reward
+        // Строго своё объявление. Поле и обещание показа обнуляются всегда
+        // вместе, поэтому «своё объявление отпущено, но своё обещание живо» -
+        // недостижимо, а вот «обещание уже следующего показа» вполне: запоздалая
+        // награда брошенного ролика досталась бы текущему.
+        guard rewardedAd === showingRewardedAd else { return }
         let rewardData: [String: Any] = ["amount": reward.amount, "type": reward.type]
+        lastRewardData = rewardData
         notifyAdEvent(adType: "rewarded", event: "rewarded", adUnitId: rewardedAdUnitId, error: nil,
                       reward: rewardData)
     }
@@ -657,8 +661,8 @@ extension YandexAdsPlugin: RewardedAdDelegate {
         showingRewardedAd = nil
         notifyAdEvent(adType: "rewarded", event: "dismissed", adUnitId: rewardedAdUnitId, error: nil, reward: nil)
         // Только к закрытию ролика ясно, досмотрел его игрок или нет.
-        settleRewardedShow(shown: true, reward: lastReward, message: nil)
-        lastReward = nil
+        settleRewardedShow(shown: true, reward: lastRewardData, message: nil)
+        lastRewardData = nil
     }
 
     public func rewardedAdDidClick(_ rewardedAd: RewardedAd) {
