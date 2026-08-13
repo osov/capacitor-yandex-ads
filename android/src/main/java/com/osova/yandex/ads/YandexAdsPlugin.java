@@ -321,6 +321,11 @@ public class YandexAdsPlugin extends Plugin {
             return;
         }
 
+        if (pendingInterstitialShowCall.get() != null) {
+            resolveFail(call, "Interstitial is being shown");
+            return;
+        }
+
         interstitialAdUnitId = adUnitId;
         // Загрузчик держит один запрос: новый вызов отменяет предыдущий, и его
         // слушатель уже не сработает - закрываем то обещание сами.
@@ -448,6 +453,8 @@ public class YandexAdsPlugin extends Plugin {
 
     @PluginMethod
     public void destroyInterstitial(PluginCall call) {
+        // Слушателя сейчас снимут - ждущий показ иначе висел бы до сторожа.
+        settleInterstitialShow(false, "Interstitial destroyed");
         getActivity().runOnUiThread(() -> {
             destroyInterstitialAd();
             resolveOk(call, null);
@@ -463,6 +470,13 @@ public class YandexAdsPlugin extends Plugin {
         String adUnitId = call.getString("adUnitId");
         if (adUnitId == null || adUnitId.isEmpty()) {
             rejectMissingParameter(call, "adUnitId");
+            return;
+        }
+
+        // Пока ролик на экране, грузить следующий нельзя: onAdLoaded подменил бы
+        // rewardedAd, а onAdDismissed показанного ролика тут же снёс бы новый.
+        if (pendingRewardedShowCall.get() != null) {
+            resolveFail(call, "Rewarded ad is being shown");
             return;
         }
 
@@ -482,13 +496,8 @@ public class YandexAdsPlugin extends Plugin {
                     rewardedLoader = new RewardedAdLoader(activity);
                 }
 
-                // Ролик может идти прямо сейчас: снять с него слушателя значит
-                // никогда не узнать о закрытии и подвесить обещание показа.
-                // Предзагрузка следующего блока - штатный сценарий.
-                if (pendingRewardedShowCall.get() == null) {
-                    destroyRewardedAd();
-                    lastReward = null;
-                }
+                destroyRewardedAd();
+                lastReward = null;
 
                 rewardedLoader.loadAd(
                     new AdRequest.Builder(adUnitId).build(),
@@ -604,6 +613,7 @@ public class YandexAdsPlugin extends Plugin {
 
     @PluginMethod
     public void destroyRewarded(PluginCall call) {
+        settleRewardedShow(false, null, "Rewarded ad destroyed");
         getActivity().runOnUiThread(() -> {
             destroyRewardedAd();
             resolveOk(call, null);
@@ -719,8 +729,9 @@ public class YandexAdsPlugin extends Plugin {
     private void settleOwnCall(AtomicReference<PluginCall> holder, @Nullable PluginCall call,
                                boolean success, @Nullable String message) {
         if (call == null) return;
-        // Если поле уже указывает на другой вызов, чужое обещание не трогаем.
-        if (!holder.compareAndSet(call, null) && holder.get() == call) return;
+        // CAS не прошёл - поле уже указывает на другой вызов, значит наш
+        // либо погашен, либо вытеснен. Чужое обещание не трогаем.
+        if (!holder.compareAndSet(call, null)) return;
         settle(call, success, message);
     }
 

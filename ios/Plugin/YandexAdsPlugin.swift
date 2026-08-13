@@ -192,6 +192,11 @@ public class YandexAdsPlugin: CAPPlugin {
             return
         }
 
+        if interstitialShowCallId != nil {
+            resolveFail(call, "Interstitial is being shown")
+            return
+        }
+
         interstitialAdUnitId = adUnitId
 
         DispatchQueue.main.async { [weak self] in
@@ -264,6 +269,14 @@ public class YandexAdsPlugin: CAPPlugin {
 
         guard let adUnitId = call.getString("adUnitId"), !adUnitId.isEmpty else {
             resolveFail(call, "Missing required parameter: adUnitId")
+            return
+        }
+
+        // Пока ролик на экране, грузить следующий нельзя: он подменил бы
+        // rewardedAd, а закрытие показанного тут же снесло бы новый. И главное -
+        // сброс lastReward стёр бы уже выданную награду.
+        if rewardedShowCallId != nil {
+            resolveFail(call, "Rewarded ad is being shown")
             return
         }
 
