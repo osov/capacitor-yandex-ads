@@ -11,6 +11,8 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 
+import java.util.concurrent.atomic.AtomicReference;
+
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -58,21 +60,24 @@ public class YandexAdsPlugin extends Plugin {
     private volatile BannerAdView bannerAdView;
     private volatile LinearLayout bannerLayout;
     private volatile String bannerAdUnitId;
-    private volatile PluginCall pendingBannerLoadCall;
+
+    // Отложенные вызовы - в AtomicReference: "прочитать и обнулить" должно быть
+    // одной операцией, иначе поток моста и UI-поток могут ответить дважды.
+    private final AtomicReference<PluginCall> pendingBannerLoadCall = new AtomicReference<>();
 
     // Interstitial
     private volatile InterstitialAdLoader interstitialLoader;
     private volatile InterstitialAd interstitialAd;
     private volatile String interstitialAdUnitId;
-    private volatile PluginCall pendingInterstitialLoadCall;
-    private volatile PluginCall pendingInterstitialShowCall;
+    private final AtomicReference<PluginCall> pendingInterstitialLoadCall = new AtomicReference<>();
+    private final AtomicReference<PluginCall> pendingInterstitialShowCall = new AtomicReference<>();
 
     // Rewarded
     private volatile RewardedAdLoader rewardedLoader;
     private volatile RewardedAd rewardedAd;
     private volatile String rewardedAdUnitId;
-    private volatile PluginCall pendingRewardedLoadCall;
-    private volatile PluginCall pendingRewardedShowCall;
+    private final AtomicReference<PluginCall> pendingRewardedLoadCall = new AtomicReference<>();
+    private final AtomicReference<PluginCall> pendingRewardedShowCall = new AtomicReference<>();
     private volatile Reward lastReward;
 
     @Override
@@ -182,7 +187,7 @@ public class YandexAdsPlugin extends Plugin {
         // Предыдущую незавершённую загрузку закрываем, иначе её обещание висит.
         settleAndClearBannerLoad(false, "Superseded by a new loadBanner() call");
         final PluginCall loadCall = hold(call);
-        pendingBannerLoadCall = loadCall;
+        pendingBannerLoadCall.set(loadCall);
 
         AppCompatActivity activity = getActivity();
         if (activity == null) {
@@ -289,11 +294,13 @@ public class YandexAdsPlugin extends Plugin {
     public void destroyBanner(PluginCall call) {
         AppCompatActivity activity = getActivity();
         if (activity == null) {
+            settleAndClearBannerLoad(false, "Banner destroyed");
             destroyBannerView();
             resolveOk(call, null);
             return;
         }
         activity.runOnUiThread(() -> {
+            settleAndClearBannerLoad(false, "Banner destroyed");
             destroyBannerView();
             resolveOk(call, null);
         });
@@ -316,7 +323,7 @@ public class YandexAdsPlugin extends Plugin {
         // слушатель уже не сработает - закрываем то обещание сами.
         settleAndClearInterstitialLoad(false, "Superseded by a new loadInterstitial() call");
         final PluginCall loadCall = hold(call);
-        pendingInterstitialLoadCall = loadCall;
+        pendingInterstitialLoadCall.set(loadCall);
 
         AppCompatActivity activity = getActivity();
         if (activity == null) {
@@ -373,7 +380,8 @@ public class YandexAdsPlugin extends Plugin {
         }
 
         settleInterstitialShow(false, "Superseded by a new showInterstitial() call");
-        pendingInterstitialShowCall = hold(call);
+        final PluginCall showCall = hold(call);
+        pendingInterstitialShowCall.set(showCall);
 
         AppCompatActivity activity = getActivity();
         if (activity == null) {
@@ -391,8 +399,9 @@ public class YandexAdsPlugin extends Plugin {
                 @Override
                 public void onAdShown() {
                     notifyAdEvent("interstitial", "shown", interstitialAdUnitId, null, null);
-                    // Отвечаем по факту показа, а не по факту вызова show().
-                    settleInterstitialShow(true, null);
+                    // Отвечаем по факту показа, а не по факту вызова show(),
+                    // и строго своему вызову: поле могло уже смениться.
+                    settleOwnCall(pendingInterstitialShowCall, showCall, true, null);
                 }
 
                 @Override
@@ -401,7 +410,7 @@ public class YandexAdsPlugin extends Plugin {
                     notifyAdEvent("interstitial", "failed_to_show", interstitialAdUnitId,
                         errorObject(0, adError.getDescription()), null);
                     destroyInterstitialAd();
-                    settleInterstitialShow(false, adError.getDescription());
+                    settleOwnCall(pendingInterstitialShowCall, showCall, false, adError.getDescription());
                 }
 
                 @Override
@@ -456,7 +465,7 @@ public class YandexAdsPlugin extends Plugin {
         rewardedAdUnitId = adUnitId;
         settleAndClearRewardedLoad(false, "Superseded by a new loadRewarded() call");
         final PluginCall loadCall = hold(call);
-        pendingRewardedLoadCall = loadCall;
+        pendingRewardedLoadCall.set(loadCall);
 
         AppCompatActivity activity = getActivity();
         if (activity == null) {
@@ -469,8 +478,13 @@ public class YandexAdsPlugin extends Plugin {
                     rewardedLoader = new RewardedAdLoader(activity);
                 }
 
-                destroyRewardedAd();
-                lastReward = null;
+                // Ролик может идти прямо сейчас: снять с него слушателя значит
+                // никогда не узнать о закрытии и подвесить обещание показа.
+                // Предзагрузка следующего блока - штатный сценарий.
+                if (pendingRewardedShowCall.get() == null) {
+                    destroyRewardedAd();
+                    lastReward = null;
+                }
 
                 rewardedLoader.loadAd(
                     new AdRequest.Builder(adUnitId).build(),
@@ -511,7 +525,8 @@ public class YandexAdsPlugin extends Plugin {
         settleRewardedShow(false, null, "Superseded by a new showRewarded() call");
         // Награда прошлого показа не должна засчитаться этому.
         lastReward = null;
-        pendingRewardedShowCall = hold(call);
+        final PluginCall showCall = hold(call);
+        pendingRewardedShowCall.set(showCall);
 
         AppCompatActivity activity = getActivity();
         if (activity == null) {
@@ -538,7 +553,7 @@ public class YandexAdsPlugin extends Plugin {
                         errorObject(0, adError.getDescription()), null);
                     destroyRewardedAd();
                     // Ролика не было - попытку сжигать нельзя.
-                    settleRewardedShow(false, null, adError.getDescription());
+                    settleRewardedShow(showCall, false, null, adError.getDescription());
                 }
 
                 @Override
@@ -556,7 +571,7 @@ public class YandexAdsPlugin extends Plugin {
                 public void onAdDismissed() {
                     notifyAdEvent("rewarded", "dismissed", rewardedAdUnitId, null, null);
                     // Только к закрытию ролика ясно, досмотрел его игрок или нет.
-                    settleRewardedShow(true, lastReward, null);
+                    settleRewardedShow(showCall, true, lastReward, null);
                     destroyRewardedAd();
                 }
 
@@ -619,11 +634,13 @@ public class YandexAdsPlugin extends Plugin {
         bannerLayout.setLayoutParams(params);
     }
 
+    /**
+     * Снимает баннер с экрана. Ждущее обещание загрузки НЕ трогает: этот метод
+     * вызывается и в начале новой загрузки, где закрывать только что
+     * зарегистрированный вызов нельзя. Закрытием занимаются те, кто
+     * действительно обрывает загрузку, - destroyBanner() и releaseAll().
+     */
     private void destroyBannerView() {
-        // Слушателя больше не будет - ждущее обещание надо закрыть здесь,
-        // иначе оно повиснет навсегда.
-        settleAndClearBannerLoad(false, "Banner destroyed");
-
         BannerAdView view = bannerAdView;
         if (view == null) return;
         bannerAdView = null;
@@ -664,52 +681,49 @@ public class YandexAdsPlugin extends Plugin {
         }
 
         // Ни один колбэк больше не придёт: закрываем всё, что ждало ответа.
+        settleAndClearBannerLoad(false, "Plugin destroyed");
         settleAndClearInterstitialLoad(false, "Plugin destroyed");
         settleAndClearRewardedLoad(false, "Plugin destroyed");
         settleInterstitialShow(false, "Plugin destroyed");
         settleRewardedShow(false, null, "Plugin destroyed");
     }
 
-    // Отложенный вызов гасим строго один раз: сначала снимаем ссылку, потом
-    // отвечаем, иначе повторный вход разрешил бы то же обещание дважды.
+    // Отложенный вызов гасим строго один раз: getAndSet сразу снимает ссылку,
+    // поэтому второй поток уже ничего не найдёт.
     private void settleAndClearBannerLoad(boolean success, @Nullable String message) {
-        PluginCall call = pendingBannerLoadCall;
-        if (call == null) return;
-        pendingBannerLoadCall = null;
-        settle(call, success, message);
+        settle(pendingBannerLoadCall.getAndSet(null), success, message);
     }
 
     private void settleAndClearInterstitialLoad(boolean success, @Nullable String message) {
-        PluginCall call = pendingInterstitialLoadCall;
-        if (call == null) return;
-        pendingInterstitialLoadCall = null;
-        settle(call, success, message);
+        settle(pendingInterstitialLoadCall.getAndSet(null), success, message);
     }
 
     private void settleAndClearRewardedLoad(boolean success, @Nullable String message) {
-        PluginCall call = pendingRewardedLoadCall;
-        if (call == null) return;
-        pendingRewardedLoadCall = null;
-        settle(call, success, message);
+        settle(pendingRewardedLoadCall.getAndSet(null), success, message);
     }
 
     private void settleInterstitialShow(boolean success, @Nullable String message) {
-        PluginCall call = pendingInterstitialShowCall;
-        if (call == null) return;
-        pendingInterstitialShowCall = null;
-        settle(call, success, message);
+        settle(pendingInterstitialShowCall.getAndSet(null), success, message);
     }
 
     /**
-     * Отвечает конкретному вызову загрузки и заодно снимает его из поля, если
-     * поле всё ещё указывает на него. Слушатель обязан отвечать захваченному
-     * вызову, а не текущему полю: между запросом и колбэком поле могло смениться.
+     * Отвечает конкретному вызову и снимает его из поля, только если поле всё
+     * ещё указывает именно на него. Колбэк обязан отвечать захваченному вызову,
+     * а не текущему полю: между запросом и ответом поле могло смениться.
      */
+    private void settleOwnCall(AtomicReference<PluginCall> holder, @Nullable PluginCall call,
+                               boolean success, @Nullable String message) {
+        if (call == null) return;
+        // Если поле уже указывает на другой вызов, чужое обещание не трогаем.
+        if (!holder.compareAndSet(call, null) && holder.get() == call) return;
+        settle(call, success, message);
+    }
+
     private void settleLoadCall(@Nullable PluginCall call, boolean success, @Nullable String message) {
         if (call == null) return;
-        if (pendingBannerLoadCall == call) pendingBannerLoadCall = null;
-        if (pendingInterstitialLoadCall == call) pendingInterstitialLoadCall = null;
-        if (pendingRewardedLoadCall == call) pendingRewardedLoadCall = null;
+        pendingBannerLoadCall.compareAndSet(call, null);
+        pendingInterstitialLoadCall.compareAndSet(call, null);
+        pendingRewardedLoadCall.compareAndSet(call, null);
         settle(call, success, message);
     }
 
@@ -720,9 +734,22 @@ public class YandexAdsPlugin extends Plugin {
      * shown=true с rewarded=false означает "показали, но игрок прервал".
      */
     private void settleRewardedShow(boolean shown, @Nullable Reward reward, @Nullable String message) {
-        PluginCall call = pendingRewardedShowCall;
+        settleRewardedShow(null, shown, reward, message);
+    }
+
+    /**
+     * expected != null - отвечаем только если поле всё ещё держит именно этот
+     * вызов: колбэк прошлого показа не должен гасить обещание следующего.
+     */
+    private void settleRewardedShow(@Nullable PluginCall expected, boolean shown,
+                                    @Nullable Reward reward, @Nullable String message) {
+        PluginCall call;
+        if (expected == null) {
+            call = pendingRewardedShowCall.getAndSet(null);
+        } else {
+            call = pendingRewardedShowCall.compareAndSet(expected, null) ? expected : null;
+        }
         if (call == null) return;
-        pendingRewardedShowCall = null;
 
         JSObject ret = new JSObject();
         ret.put("success", shown);

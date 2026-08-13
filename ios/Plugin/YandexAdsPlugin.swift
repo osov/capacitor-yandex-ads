@@ -14,6 +14,8 @@ import YandexMobileAds
 public class YandexAdsPlugin: CAPPlugin {
 
     private var isInitialized = false
+    // Вызов init(), ждущий ответа: гонку колбэка и сторожа разводим по нему.
+    private var pendingInitCall: CAPPluginCall?
 
     // Banner
     private var bannerAdView: BannerAdView?
@@ -58,23 +60,27 @@ public class YandexAdsPlugin: CAPPlugin {
             if enableLogging { YandexAds.enableLogging() }
 
             // Без сети колбэк может не прийти вовсе - не держим вызов вечно.
-            var isSettled = false
+            // Признак хранится в свойстве плагина, а не в локальной переменной:
+            // completionHandler у initializeSDK помечен @Sendable, и мутировать
+            // захваченную var внутри него нельзя (ошибка компиляции).
+            self.pendingInitCall = call
 
             YandexAds.initializeSDK { [weak self] in
                 guard let self = self else { return }
                 // Флаг ставим до проверки сторожа: SDK готов независимо от того,
                 // успели ли мы ответить по таймауту.
                 self.isInitialized = true
-                if isSettled { return }
-                isSettled = true
+                guard let pending = self.pendingInitCall, pending === call else { return }
+                self.pendingInitCall = nil
 
                 self.notifyAdEvent(adType: "init", event: "loaded", adUnitId: nil, error: nil, reward: nil)
                 call.resolve(["success": true])
             }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.initTimeout) {
-                if isSettled { return }
-                isSettled = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.initTimeout) { [weak self] in
+                guard let self = self else { return }
+                guard let pending = self.pendingInitCall, pending === call else { return }
+                self.pendingInitCall = nil
                 self.resolveFail(call, "Initialization timeout")
             }
         }
@@ -108,7 +114,10 @@ public class YandexAdsPlugin: CAPPlugin {
         DispatchQueue.main.async { @MainActor [weak self] in
             guard let self = self else { return }
             guard let rootView = self.bridge?.viewController?.view else {
-                self.resolveFail(call, "Failed to get view controller")
+                // Вызов уже удержан - отвечаем через settle, иначе он останется
+                // в saved calls и разрешится второй раз.
+                self.settle(&self.bannerLoadCallId,
+                            with: ["success": false, "message": "Failed to get view controller"])
                 return
             }
 
@@ -163,7 +172,10 @@ public class YandexAdsPlugin: CAPPlugin {
 
     @objc func destroyBanner(_ call: CAPPluginCall) {
         DispatchQueue.main.async { [weak self] in
-            self?.destroyBannerView()
+            guard let self = self else { return }
+            // Здесь загрузка действительно обрывается - закрываем её обещание.
+            self.settle(&self.bannerLoadCallId, with: ["success": false, "message": "Banner destroyed"])
+            self.destroyBannerView()
             call.resolve(["success": true])
         }
     }
@@ -329,9 +341,10 @@ public class YandexAdsPlugin: CAPPlugin {
         NSLayoutConstraint.activate(constraints)
     }
 
+    /// Снимает баннер с экрана. Ждущее обещание загрузки НЕ трогает: метод
+    /// вызывается и в начале новой загрузки, где закрывать только что
+    /// зарегистрированный вызов нельзя.
     private func destroyBannerView() {
-        // Делегата больше не будет - ждущее обещание загрузки закрываем здесь.
-        settle(&bannerLoadCallId, with: ["success": false, "message": "Banner destroyed"])
         bannerAdView?.delegate = nil
         bannerAdView?.removeFromSuperview()
         bannerAdView = nil
