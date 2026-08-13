@@ -1,6 +1,7 @@
 import { WebPlugin } from '@capacitor/core';
 
 import type {
+  YandexAdsPlugin,
   InitOptions,
   AdLoadedResult,
   AdResult,
@@ -10,7 +11,9 @@ import type {
   RewardedAdResult,
 } from './definitions';
 
-export class YandexAdsWeb extends WebPlugin {
+// implements обязателен: без него расхождение заглушки с интерфейсом плагина
+// компилятор не поймает, и web-сборка молча теряла бы методы.
+export class YandexAdsWeb extends WebPlugin implements YandexAdsPlugin {
   async init(_options?: InitOptions): Promise<AdResult> {
     console.warn('YandexAds: init() is not available on web platform');
     return { success: false, message: 'Not available on web' };

@@ -11,6 +11,9 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 
+import android.os.Handler;
+import android.os.Looper;
+
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.getcapacitor.JSObject;
@@ -49,6 +52,11 @@ import com.yandex.mobile.ads.rewarded.RewardedAdLoader;
 public class YandexAdsPlugin extends Plugin {
     private static final String TAG = "YandexAds";
 
+    // Методы плагина Capacitor выполняет на своём потоке, поэтому отложенные
+    // задачи ставим через явный Handler главного потока: View.postDelayed при
+    // неудачном чтении состояния привязки молча не срабатывает.
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
     // Инициализация не должна вешать вызов навсегда, если ответа нет.
     private static final long INIT_TIMEOUT_MS = 10000;
     // Показ тоже: если SDK потеряет колбэк, обещание показа висело бы вечно, а
@@ -58,6 +66,9 @@ public class YandexAdsPlugin extends Plugin {
     // Методы плагина Capacitor выполняет на своём потоке, а колбэки SDK
     // приходят на UI-поток, поэтому всё разделяемое состояние - volatile.
     private volatile boolean isInitialized = false;
+    // Вызов init() тоже отложенный: без этого его обещание не закрывал бы никто
+    // при уничтожении плагина, а сторож снимается вместе с остальными задачами.
+    private final AtomicReference<PluginCall> pendingInitCall = new AtomicReference<>();
 
     // Banner
     private volatile BannerAdView bannerAdView;
@@ -71,6 +82,10 @@ public class YandexAdsPlugin extends Plugin {
     // Interstitial
     private volatile InterstitialAdLoader interstitialLoader;
     private volatile InterstitialAd interstitialAd;
+    // Показываемое сейчас объявление держим отдельно от предзагруженного: иначе
+    // предзагрузка во время показа снимала бы слушателя с того, что на экране,
+    // и события о его закрытии в JS уже не приходили бы.
+    private volatile InterstitialAd showingInterstitialAd;
     private volatile String interstitialAdUnitId;
     private final AtomicReference<PluginCall> pendingInterstitialLoadCall = new AtomicReference<>();
     private final AtomicReference<PluginCall> pendingInterstitialShowCall = new AtomicReference<>();
@@ -78,10 +93,10 @@ public class YandexAdsPlugin extends Plugin {
     // Rewarded
     private volatile RewardedAdLoader rewardedLoader;
     private volatile RewardedAd rewardedAd;
+    private volatile RewardedAd showingRewardedAd;
     private volatile String rewardedAdUnitId;
     private final AtomicReference<PluginCall> pendingRewardedLoadCall = new AtomicReference<>();
     private final AtomicReference<PluginCall> pendingRewardedShowCall = new AtomicReference<>();
-    private volatile Reward lastReward;
 
     @Override
     public void load() {
@@ -102,8 +117,15 @@ public class YandexAdsPlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
-        AppCompatActivity activity = getActivity();
-        if (activity != null) activity.runOnUiThread(this::releaseAll);
+        // Сторожа показа живут до пяти минут и держат ссылку на плагин, а через
+        // него - на activity. Без снятия задач она пережила бы своё уничтожение.
+        runOnUi(() -> {
+            releaseAll();
+            // Снимаем задачи уже после уборки: сторожа держат ссылку на плагин,
+            // а через него на activity. Раньше нельзя - при отсутствующей
+            // activity сама уборка идёт через этот же обработчик.
+            mainHandler.removeCallbacksAndMessages(null);
+        });
         super.handleOnDestroy();
     }
 
@@ -116,13 +138,20 @@ public class YandexAdsPlugin extends Plugin {
             return;
         }
 
-        AppCompatActivity activity = getActivity();
         Boolean userConsent = call.getBoolean("userConsent");
         Boolean ageRestrictedUser = call.getBoolean("ageRestrictedUser");
         Boolean locationTracking = call.getBoolean("locationTracking");
         Boolean enableLogging = call.getBoolean("enableLogging");
 
-        activity.runOnUiThread(() -> {
+        final PluginCall initCall = hold(call);
+        settle(pendingInitCall.getAndSet(initCall), false, "Superseded by a new init() call");
+
+        runOnUi(() -> {
+            AppCompatActivity activity = getActivity();
+            if (activity == null) {
+                settleOwnInit(initCall, false, "Activity is gone");
+                return;
+            }
             // Политики приватности выставляются до инициализации SDK.
             if (userConsent != null) YandexAds.setUserConsent(userConsent);
             if (ageRestrictedUser != null) YandexAds.setAgeRestricted(ageRestrictedUser);
@@ -131,30 +160,25 @@ public class YandexAdsPlugin extends Plugin {
 
             // Начиная с SDK 8 библиотека поднимается сама при старте приложения;
             // этот вызов лишь дожидается конца инициализации.
-            final boolean[] isSettled = { false };
-
             YandexAds.initialize(activity, () -> {
-                // Флаг ставим до проверки сторожа: SDK готов независимо от того,
+                // Флаг ставим до проверки владения: SDK готов независимо от того,
                 // успели ли мы уже ответить по таймауту. Иначе поздний колбэк
                 // оставлял бы плагин "неинициализированным" навсегда.
                 isInitialized = true;
                 Log.d(TAG, "SDK initialized, version " + YandexAds.getLibraryVersion());
 
-                if (isSettled[0]) return;
-                isSettled[0] = true;
-
+                if (!pendingInitCall.compareAndSet(initCall, null)) return;
                 notifyAdEvent("init", "loaded", null, null, null);
-                resolveOk(call, null);
+                settle(initCall, true, null);
             });
 
             // Без сети колбэк может не прийти вовсе - не держим вызов вечно.
-            bannerLayout.postDelayed(() -> {
-                if (isSettled[0]) return;
-                isSettled[0] = true;
+            mainHandler.postDelayed(() -> {
+                if (!pendingInitCall.compareAndSet(initCall, null)) return;
 
                 Log.w(TAG, "SDK init timed out");
                 notifyAdEvent("init", "failed_to_load", null, errorObject(0, "Initialization timeout"), null);
-                resolveFail(call, "Initialization timeout");
+                settle(initCall, false, "Initialization timeout");
             }, INIT_TIMEOUT_MS);
         });
     }
@@ -188,9 +212,8 @@ public class YandexAdsPlugin extends Plugin {
 
         bannerAdUnitId = adUnitId;
         // Предыдущую незавершённую загрузку закрываем, иначе её обещание висит.
-        settleAndClearBannerLoad(false, "Superseded by a new loadBanner() call");
         final PluginCall loadCall = hold(call);
-        pendingBannerLoadCall.set(loadCall);
+        settle(pendingBannerLoadCall.getAndSet(loadCall), false, "Superseded by a new loadBanner() call");
 
         AppCompatActivity activity = getActivity();
         if (activity == null) {
@@ -295,14 +318,7 @@ public class YandexAdsPlugin extends Plugin {
 
     @PluginMethod
     public void destroyBanner(PluginCall call) {
-        AppCompatActivity activity = getActivity();
-        if (activity == null) {
-            settleAndClearBannerLoad(false, "Banner destroyed");
-            destroyBannerView();
-            resolveOk(call, null);
-            return;
-        }
-        activity.runOnUiThread(() -> {
+        runOnUi(() -> {
             settleAndClearBannerLoad(false, "Banner destroyed");
             destroyBannerView();
             resolveOk(call, null);
@@ -321,17 +337,11 @@ public class YandexAdsPlugin extends Plugin {
             return;
         }
 
-        if (pendingInterstitialShowCall.get() != null) {
-            resolveFail(call, "Interstitial is being shown");
-            return;
-        }
-
         interstitialAdUnitId = adUnitId;
         // Загрузчик держит один запрос: новый вызов отменяет предыдущий, и его
         // слушатель уже не сработает - закрываем то обещание сами.
-        settleAndClearInterstitialLoad(false, "Superseded by a new loadInterstitial() call");
         final PluginCall loadCall = hold(call);
-        pendingInterstitialLoadCall.set(loadCall);
+        settle(pendingInterstitialLoadCall.getAndSet(loadCall), false, "Superseded by a new loadInterstitial() call");
 
         AppCompatActivity activity = getActivity();
         if (activity == null) {
@@ -387,10 +397,8 @@ public class YandexAdsPlugin extends Plugin {
             return;
         }
 
-        settleInterstitialShow(false, "Superseded by a new showInterstitial() call");
         final PluginCall showCall = hold(call);
-        pendingInterstitialShowCall.set(showCall);
-        armShowWatchdog(pendingInterstitialShowCall, showCall, "interstitial");
+        settle(pendingInterstitialShowCall.getAndSet(showCall), false, "Superseded by a new showInterstitial() call");
 
         AppCompatActivity activity = getActivity();
         if (activity == null) {
@@ -400,9 +408,14 @@ public class YandexAdsPlugin extends Plugin {
         activity.runOnUiThread(() -> {
             InterstitialAd ad = interstitialAd;
             if (ad == null) {
-                settleInterstitialShow(false, "Interstitial not loaded");
+                settleOwnCall(pendingInterstitialShowCall, showCall, false, "Interstitial not loaded");
                 return;
             }
+            // С этого момента объявление показывается, а поле предзагрузки
+            // свободно: следующее можно грузить, не трогая то, что на экране.
+            interstitialAd = null;
+            showingInterstitialAd = ad;
+            armInterstitialShowWatchdog(showCall, ad);
 
             ad.setAdEventListener(new InterstitialAdEventListener() {
                 @Override
@@ -418,7 +431,7 @@ public class YandexAdsPlugin extends Plugin {
                     Log.e(TAG, "Interstitial failed to show: " + adError.getDescription());
                     notifyAdEvent("interstitial", "failed_to_show", interstitialAdUnitId,
                         errorObject(0, adError.getDescription()), null);
-                    destroyInterstitialAd();
+                    releaseShowingInterstitial(ad);
                     settleOwnCall(pendingInterstitialShowCall, showCall, false, adError.getDescription());
                 }
 
@@ -426,7 +439,7 @@ public class YandexAdsPlugin extends Plugin {
                 public void onAdDismissed() {
                     notifyAdEvent("interstitial", "dismissed", interstitialAdUnitId, null, null);
                     // Показанный объект переиспользовать нельзя - освобождаем.
-                    destroyInterstitialAd();
+                    releaseShowingInterstitial(ad);
                 }
 
                 @Override
@@ -440,7 +453,13 @@ public class YandexAdsPlugin extends Plugin {
                 }
             });
 
-            ad.show(activity);
+            try {
+                ad.show(activity);
+            } catch (Exception e) {
+                Log.e(TAG, "Error showing interstitial: " + e.getMessage());
+                releaseShowingInterstitial(ad);
+                settleOwnCall(pendingInterstitialShowCall, showCall, false, e.getMessage());
+            }
         });
     }
 
@@ -455,8 +474,9 @@ public class YandexAdsPlugin extends Plugin {
     public void destroyInterstitial(PluginCall call) {
         // Слушателя сейчас снимут - ждущий показ иначе висел бы до сторожа.
         settleInterstitialShow(false, "Interstitial destroyed");
-        getActivity().runOnUiThread(() -> {
+        runOnUi(() -> {
             destroyInterstitialAd();
+            releaseShowingInterstitial(showingInterstitialAd);
             resolveOk(call, null);
         });
     }
@@ -473,17 +493,9 @@ public class YandexAdsPlugin extends Plugin {
             return;
         }
 
-        // Пока ролик на экране, грузить следующий нельзя: onAdLoaded подменил бы
-        // rewardedAd, а onAdDismissed показанного ролика тут же снёс бы новый.
-        if (pendingRewardedShowCall.get() != null) {
-            resolveFail(call, "Rewarded ad is being shown");
-            return;
-        }
-
         rewardedAdUnitId = adUnitId;
-        settleAndClearRewardedLoad(false, "Superseded by a new loadRewarded() call");
         final PluginCall loadCall = hold(call);
-        pendingRewardedLoadCall.set(loadCall);
+        settle(pendingRewardedLoadCall.getAndSet(loadCall), false, "Superseded by a new loadRewarded() call");
 
         AppCompatActivity activity = getActivity();
         if (activity == null) {
@@ -497,7 +509,6 @@ public class YandexAdsPlugin extends Plugin {
                 }
 
                 destroyRewardedAd();
-                lastReward = null;
 
                 rewardedLoader.loadAd(
                     new AdRequest.Builder(adUnitId).build(),
@@ -535,12 +546,8 @@ public class YandexAdsPlugin extends Plugin {
             return;
         }
 
-        settleRewardedShow(false, null, "Superseded by a new showRewarded() call");
-        // Награда прошлого показа не должна засчитаться этому.
-        lastReward = null;
         final PluginCall showCall = hold(call);
-        pendingRewardedShowCall.set(showCall);
-        armRewardedShowWatchdog(showCall);
+        settle(pendingRewardedShowCall.getAndSet(showCall), false, "Superseded by a new showRewarded() call");
 
         AppCompatActivity activity = getActivity();
         if (activity == null) {
@@ -550,9 +557,17 @@ public class YandexAdsPlugin extends Plugin {
         activity.runOnUiThread(() -> {
             RewardedAd ad = rewardedAd;
             if (ad == null) {
-                settleRewardedShow(false, null, "Rewarded ad not loaded");
+                settleRewardedShow(showCall, false, null, "Rewarded ad not loaded");
                 return;
             }
+            rewardedAd = null;
+            showingRewardedAd = ad;
+            armRewardedShowWatchdog(showCall, ad);
+
+            // Награда принадлежит этому показу. В общем поле её мог бы
+            // перезаписать запоздалый onRewarded брошенного ролика - и игрок
+            // получил бы награду за непросмотренный.
+            final Reward[] reward = { null };
 
             ad.setAdEventListener(new RewardedAdEventListener() {
                 @Override
@@ -565,19 +580,19 @@ public class YandexAdsPlugin extends Plugin {
                     Log.e(TAG, "Rewarded failed to show: " + adError.getDescription());
                     notifyAdEvent("rewarded", "failed_to_show", rewardedAdUnitId,
                         errorObject(0, adError.getDescription()), null);
-                    destroyRewardedAd();
+                    releaseShowingRewarded(ad);
                     // Ролика не было - попытку сжигать нельзя.
                     settleRewardedShow(showCall, false, null, adError.getDescription());
                 }
 
                 @Override
-                public void onRewarded(@NonNull Reward reward) {
-                    Log.d(TAG, "Rewarded: " + reward.getAmount() + " " + reward.getType());
-                    lastReward = reward;
+                public void onRewarded(@NonNull Reward rewardValue) {
+                    Log.d(TAG, "Rewarded: " + rewardValue.getAmount() + " " + rewardValue.getType());
+                    reward[0] = rewardValue;
 
                     JSObject rewardObj = new JSObject();
-                    rewardObj.put("amount", reward.getAmount());
-                    rewardObj.put("type", reward.getType());
+                    rewardObj.put("amount", rewardValue.getAmount());
+                    rewardObj.put("type", rewardValue.getType());
                     notifyAdEvent("rewarded", "rewarded", rewardedAdUnitId, null, rewardObj);
                 }
 
@@ -585,8 +600,8 @@ public class YandexAdsPlugin extends Plugin {
                 public void onAdDismissed() {
                     notifyAdEvent("rewarded", "dismissed", rewardedAdUnitId, null, null);
                     // Только к закрытию ролика ясно, досмотрел его игрок или нет.
-                    settleRewardedShow(showCall, true, lastReward, null);
-                    destroyRewardedAd();
+                    settleRewardedShow(showCall, true, reward[0], null);
+                    releaseShowingRewarded(ad);
                 }
 
                 @Override
@@ -600,7 +615,13 @@ public class YandexAdsPlugin extends Plugin {
                 }
             });
 
-            ad.show(activity);
+            try {
+                ad.show(activity);
+            } catch (Exception e) {
+                Log.e(TAG, "Error showing rewarded: " + e.getMessage());
+                releaseShowingRewarded(ad);
+                settleRewardedShow(showCall, false, null, e.getMessage());
+            }
         });
     }
 
@@ -614,8 +635,9 @@ public class YandexAdsPlugin extends Plugin {
     @PluginMethod
     public void destroyRewarded(PluginCall call) {
         settleRewardedShow(false, null, "Rewarded ad destroyed");
-        getActivity().runOnUiThread(() -> {
+        runOnUi(() -> {
             destroyRewardedAd();
+            releaseShowingRewarded(showingRewardedAd);
             resolveOk(call, null);
         });
     }
@@ -681,10 +703,48 @@ public class YandexAdsPlugin extends Plugin {
         ad.setAdEventListener(null);
     }
 
+    /**
+     * Выполняет действие на UI-потоке. Activity к этому моменту может быть уже
+     * уничтожена, а методы плагина Capacitor зовёт на своём потоке: без этого
+     * запасного пути getActivity() дал бы NPE, а работа с View -
+     * CalledFromWrongThreadException. Исключение, вылетевшее из метода плагина,
+     * Capacitor перебрасывает как RuntimeException и роняет процесс.
+     */
+    private void runOnUi(Runnable action) {
+        AppCompatActivity activity = getActivity();
+        if (activity != null) activity.runOnUiThread(action);
+        else mainHandler.post(action);
+    }
+
+    /**
+     * Освобождает показанное объявление. Поле обнуляем только если на экране всё
+     * ещё оно: запоздалый колбэк брошенного объявления не должен трогать
+     * следующее, которое к этому моменту уже показывается.
+     */
+    private void releaseShowingInterstitial(@Nullable InterstitialAd ad) {
+        if (ad == null) return;
+        ad.setAdEventListener(null);
+        if (showingInterstitialAd == ad) showingInterstitialAd = null;
+    }
+
+    private void releaseShowingRewarded(@Nullable RewardedAd ad) {
+        if (ad == null) return;
+        ad.setAdEventListener(null);
+        if (showingRewardedAd == ad) showingRewardedAd = null;
+    }
+
+    /** Закрывает вызов init(), если он всё ещё наш. */
+    private void settleOwnInit(PluginCall call, boolean success, @Nullable String message) {
+        if (!pendingInitCall.compareAndSet(call, null)) return;
+        settle(call, success, message);
+    }
+
     private void releaseAll() {
         destroyBannerView();
         destroyInterstitialAd();
         destroyRewardedAd();
+        releaseShowingInterstitial(showingInterstitialAd);
+        releaseShowingRewarded(showingRewardedAd);
 
         if (interstitialLoader != null) {
             interstitialLoader.cancelLoading();
@@ -696,6 +756,7 @@ public class YandexAdsPlugin extends Plugin {
         }
 
         // Ни один колбэк больше не придёт: закрываем всё, что ждало ответа.
+        settle(pendingInitCall.getAndSet(null), false, "Plugin destroyed");
         settleAndClearBannerLoad(false, "Plugin destroyed");
         settleAndClearInterstitialLoad(false, "Plugin destroyed");
         settleAndClearRewardedLoad(false, "Plugin destroyed");
@@ -737,9 +798,12 @@ public class YandexAdsPlugin extends Plugin {
 
     private void settleLoadCall(@Nullable PluginCall call, boolean success, @Nullable String message) {
         if (call == null) return;
-        pendingBannerLoadCall.compareAndSet(call, null);
-        pendingInterstitialLoadCall.compareAndSet(call, null);
-        pendingRewardedLoadCall.compareAndSet(call, null);
+        // Отвечаем только если поле всё ещё держит именно этот вызов: иначе его
+        // уже погасили как вытесненный, и второй ответ был бы лишним.
+        boolean isOwner = pendingBannerLoadCall.compareAndSet(call, null)
+            || pendingInterstitialLoadCall.compareAndSet(call, null)
+            || pendingRewardedLoadCall.compareAndSet(call, null);
+        if (!isOwner) return;
         settle(call, success, message);
     }
 
@@ -789,20 +853,21 @@ public class YandexAdsPlugin extends Plugin {
      * пришёл. Отвечает только своему вызову: к этому моменту мог начаться
      * следующий показ.
      */
-    private void armShowWatchdog(AtomicReference<PluginCall> holder, PluginCall call, String label) {
-        LinearLayout layout = bannerLayout;
-        if (layout == null) return;
-        layout.postDelayed(() -> {
-            if (holder.get() != call) return;
-            Log.w(TAG, label + ": не дождались колбэка показа");
-            settleOwnCall(holder, call, false, "Show timeout");
+    private void armInterstitialShowWatchdog(PluginCall call, InterstitialAd ad) {
+        mainHandler.postDelayed(() -> {
+            // Объявление освобождаем в любом случае: обещание показа interstitial
+            // закрывается уже в onAdShown, и проверка "вызов ещё мой" здесь
+            // всегда была бы ложной - объявление со слушателем утекало бы.
+            releaseShowingInterstitial(ad);
+            if (pendingInterstitialShowCall.get() != call) return;
+            Log.w(TAG, "interstitial: не дождались колбэка показа");
+            settleOwnCall(pendingInterstitialShowCall, call, false, "Show timeout");
         }, SHOW_TIMEOUT_MS);
     }
 
-    private void armRewardedShowWatchdog(PluginCall call) {
-        LinearLayout layout = bannerLayout;
-        if (layout == null) return;
-        layout.postDelayed(() -> {
+    private void armRewardedShowWatchdog(PluginCall call, RewardedAd ad) {
+        mainHandler.postDelayed(() -> {
+            releaseShowingRewarded(ad);
             if (pendingRewardedShowCall.get() != call) return;
             Log.w(TAG, "rewarded: не дождались колбэка показа");
             // success=false: ролика по сути не было, попытку сжигать нельзя.

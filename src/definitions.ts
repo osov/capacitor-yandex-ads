@@ -294,7 +294,10 @@ export interface YandexAdsPlugin {
   addListener(
     eventName: 'adEvent',
     listenerFunc: (event: YandexAdEvent) => void,
-  ): Promise<PluginListenerHandle> & PluginListenerHandle;
+    // Пересечение с PluginListenerHandle - наследие Capacitor 3, где
+    // addListener можно было не ждать. С Capacitor 4 он возвращает только
+    // обещание, и web-заглушка такой сигнатуре уже не соответствовала.
+  ): Promise<PluginListenerHandle>;
 
   /**
    * Remove all listeners
