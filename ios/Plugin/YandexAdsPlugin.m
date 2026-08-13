@@ -11,6 +11,10 @@ CAP_PLUGIN(YandexAdsPlugin, "YandexAds",
            CAP_PLUGIN_METHOD(destroyBanner, CAPPluginReturnPromise);
            CAP_PLUGIN_METHOD(loadInterstitial, CAPPluginReturnPromise);
            CAP_PLUGIN_METHOD(showInterstitial, CAPPluginReturnPromise);
+           CAP_PLUGIN_METHOD(isInterstitialLoaded, CAPPluginReturnPromise);
+           CAP_PLUGIN_METHOD(destroyInterstitial, CAPPluginReturnPromise);
            CAP_PLUGIN_METHOD(loadRewarded, CAPPluginReturnPromise);
            CAP_PLUGIN_METHOD(showRewarded, CAPPluginReturnPromise);
+           CAP_PLUGIN_METHOD(isRewardedLoaded, CAPPluginReturnPromise);
+           CAP_PLUGIN_METHOD(destroyRewarded, CAPPluginReturnPromise);
 )

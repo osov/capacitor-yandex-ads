@@ -1,11 +1,13 @@
 package com.osova.yandex.ads;
 
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 
@@ -14,48 +16,69 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
-import com.yandex.mobile.ads.banner.AdSize;
 import com.yandex.mobile.ads.banner.BannerAdEventListener;
+import com.yandex.mobile.ads.banner.BannerAdSize;
 import com.yandex.mobile.ads.banner.BannerAdView;
+import com.yandex.mobile.ads.common.AdError;
 import com.yandex.mobile.ads.common.AdRequest;
 import com.yandex.mobile.ads.common.AdRequestError;
 import com.yandex.mobile.ads.common.ImpressionData;
-import com.yandex.mobile.ads.common.InitializationListener;
-import com.yandex.mobile.ads.common.MobileAds;
+import com.yandex.mobile.ads.common.YandexAds;
 import com.yandex.mobile.ads.interstitial.InterstitialAd;
 import com.yandex.mobile.ads.interstitial.InterstitialAdEventListener;
+import com.yandex.mobile.ads.interstitial.InterstitialAdLoadListener;
+import com.yandex.mobile.ads.interstitial.InterstitialAdLoader;
 import com.yandex.mobile.ads.rewarded.Reward;
 import com.yandex.mobile.ads.rewarded.RewardedAd;
 import com.yandex.mobile.ads.rewarded.RewardedAdEventListener;
+import com.yandex.mobile.ads.rewarded.RewardedAdLoadListener;
+import com.yandex.mobile.ads.rewarded.RewardedAdLoader;
 
+/**
+ * Yandex Mobile Ads SDK 8.x.
+ *
+ * По сравнению с SDK 5-7 изменилось почти всё, что трогает этот плагин:
+ * точка входа MobileAds переименована в YandexAds, идентификатор блока
+ * переехал в AdRequest (AdRequestConfiguration больше нет), слушатель
+ * загрузки передаётся прямо в loadAd(), а BannerAdSize.stickySize/fixedSize
+ * стали sticky/fixed и требуют контекст.
+ */
 @CapacitorPlugin(name = "YandexAds")
 public class YandexAdsPlugin extends Plugin {
     private static final String TAG = "YandexAds";
 
-    // SDK state
-    private boolean isInitialized = false;
+    // Инициализация не должна вешать вызов навсегда, если ответа нет.
+    private static final long INIT_TIMEOUT_MS = 10000;
+
+    // Методы плагина Capacitor выполняет на своём потоке, а колбэки SDK
+    // приходят на UI-поток, поэтому всё разделяемое состояние - volatile.
+    private volatile boolean isInitialized = false;
 
     // Banner
-    private BannerAdView bannerAdView;
-    private LinearLayout bannerLayout;
-    private String bannerAdUnitId;
+    private volatile BannerAdView bannerAdView;
+    private volatile LinearLayout bannerLayout;
+    private volatile String bannerAdUnitId;
+    private volatile PluginCall pendingBannerLoadCall;
 
     // Interstitial
-    private InterstitialAd interstitialAd;
-    private String interstitialAdUnitId;
-    private boolean isInterstitialLoaded = false;
+    private volatile InterstitialAdLoader interstitialLoader;
+    private volatile InterstitialAd interstitialAd;
+    private volatile String interstitialAdUnitId;
+    private volatile PluginCall pendingInterstitialLoadCall;
+    private volatile PluginCall pendingInterstitialShowCall;
 
     // Rewarded
-    private RewardedAd rewardedAd;
-    private String rewardedAdUnitId;
-    private boolean isRewardedLoaded = false;
-    private Reward lastReward;
+    private volatile RewardedAdLoader rewardedLoader;
+    private volatile RewardedAd rewardedAd;
+    private volatile String rewardedAdUnitId;
+    private volatile PluginCall pendingRewardedLoadCall;
+    private volatile PluginCall pendingRewardedShowCall;
+    private volatile Reward lastReward;
 
     @Override
     public void load() {
         AppCompatActivity activity = getActivity();
         activity.runOnUiThread(() -> {
-            // Create banner container layout
             bannerLayout = new LinearLayout(activity);
             bannerLayout.setOrientation(LinearLayout.HORIZONTAL);
 
@@ -69,47 +92,70 @@ public class YandexAdsPlugin extends Plugin {
         });
     }
 
-    /**
-     * Initialize Yandex Mobile Ads SDK
-     */
+    @Override
+    protected void handleOnDestroy() {
+        AppCompatActivity activity = getActivity();
+        if (activity != null) activity.runOnUiThread(this::releaseAll);
+        super.handleOnDestroy();
+    }
+
+    // MARK: - SDK
+
     @PluginMethod
     public void init(PluginCall call) {
         if (isInitialized) {
-            JSObject ret = new JSObject();
-            ret.put("success", true);
-            ret.put("message", "Already initialized");
-            call.resolve(ret);
+            resolveOk(call, "Already initialized");
             return;
         }
 
-        Log.d(TAG, "Initializing Yandex Mobile Ads SDK");
+        AppCompatActivity activity = getActivity();
+        Boolean userConsent = call.getBoolean("userConsent");
+        Boolean ageRestrictedUser = call.getBoolean("ageRestrictedUser");
+        Boolean locationTracking = call.getBoolean("locationTracking");
+        Boolean enableLogging = call.getBoolean("enableLogging");
 
-        MobileAds.initialize(getActivity(), new InitializationListener() {
-            @Override
-            public void onInitializationCompleted() {
-                Log.d(TAG, "SDK initialized successfully");
+        activity.runOnUiThread(() -> {
+            // Политики приватности выставляются до инициализации SDK.
+            if (userConsent != null) YandexAds.setUserConsent(userConsent);
+            if (ageRestrictedUser != null) YandexAds.setAgeRestricted(ageRestrictedUser);
+            if (locationTracking != null) YandexAds.setLocationTracking(locationTracking);
+            if (Boolean.TRUE.equals(enableLogging)) YandexAds.enableLogging(true);
+
+            // Начиная с SDK 8 библиотека поднимается сама при старте приложения;
+            // этот вызов лишь дожидается конца инициализации.
+            final boolean[] isSettled = { false };
+
+            YandexAds.initialize(activity, () -> {
+                // Флаг ставим до проверки сторожа: SDK готов независимо от того,
+                // успели ли мы уже ответить по таймауту. Иначе поздний колбэк
+                // оставлял бы плагин "неинициализированным" навсегда.
                 isInitialized = true;
+                Log.d(TAG, "SDK initialized, version " + YandexAds.getLibraryVersion());
 
-                // Send event
+                if (isSettled[0]) return;
+                isSettled[0] = true;
+
                 notifyAdEvent("init", "loaded", null, null, null);
+                resolveOk(call, null);
+            });
 
-                // Resolve promise
-                JSObject ret = new JSObject();
-                ret.put("success", true);
-                call.resolve(ret);
-            }
+            // Без сети колбэк может не прийти вовсе - не держим вызов вечно.
+            bannerLayout.postDelayed(() -> {
+                if (isSettled[0]) return;
+                isSettled[0] = true;
+
+                Log.w(TAG, "SDK init timed out");
+                notifyAdEvent("init", "failed_to_load", null, errorObject(0, "Initialization timeout"), null);
+                resolveFail(call, "Initialization timeout");
+            }, INIT_TIMEOUT_MS);
         });
     }
 
-    /**
-     * Load a banner ad
-     */
+    // MARK: - Banner
+
     @PluginMethod
     public void loadBanner(PluginCall call) {
-        if (!isInitialized) {
-            rejectNotInitialized(call);
-            return;
-        }
+        if (notInitialized(call)) return;
 
         String adUnitId = call.getString("adUnitId");
         if (adUnitId == null || adUnitId.isEmpty()) {
@@ -133,206 +179,131 @@ public class YandexAdsPlugin extends Plugin {
         String position = call.getString("position", "bottom");
 
         bannerAdUnitId = adUnitId;
+        // Предыдущую незавершённую загрузку закрываем, иначе её обещание висит.
+        settleAndClearBannerLoad(false, "Superseded by a new loadBanner() call");
+        final PluginCall loadCall = hold(call);
+        pendingBannerLoadCall = loadCall;
 
         AppCompatActivity activity = getActivity();
+        if (activity == null) {
+            settleAndClearBannerLoad(false, "Activity is gone");
+            return;
+        }
         activity.runOnUiThread(() -> {
             try {
-                // Destroy existing banner if any
-                if (bannerAdView != null) {
-                    bannerAdView.destroy();
-                    bannerLayout.removeAllViews();
-                }
+                destroyBannerView();
 
-                // Create new banner
-                bannerAdView = new BannerAdView(activity);
-                bannerAdView.setAdUnitId(adUnitId);
+                BannerAdView view = new BannerAdView(activity);
 
-                // Set adaptive size
-                AdSize adSize;
-                if (height != null && height > 0) {
-                    adSize = AdSize.flexibleSize(width, height);
-                } else {
-                    // Adaptive banner - height calculated automatically
-                    adSize = AdSize.stickySize(width);
-                }
-                bannerAdView.setAdSize(adSize);
+                // Размер считает сам SDK, и ему нужен контекст: методов
+                // stickySize/fixedSize без контекста в SDK 8 больше нет.
+                BannerAdSize adSize = (height != null && height > 0)
+                    ? BannerAdSize.fixed(activity, width, height)
+                    : BannerAdSize.sticky(activity, resolveStickyWidthDp(activity, width));
+                view.setAdSize(adSize);
 
-                // Update banner position
-                FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) bannerLayout.getLayoutParams();
-                if ("top".equalsIgnoreCase(position)) {
-                    params.gravity = Gravity.CENTER_HORIZONTAL | Gravity.TOP;
-                    // Добавляем отступ под строку состояния
-                    int statusBarHeight = 0;
-                    int resourceId = activity.getResources().getIdentifier("status_bar_height", "dimen", "android");
-                    if (resourceId > 0) {
-                        statusBarHeight = activity.getResources().getDimensionPixelSize(resourceId);
-                    }
-                    params.topMargin = statusBarHeight;
-                } else {
+                applyBannerPosition(activity, position);
 
-                    params.gravity = Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM;
-
-                    params.topMargin = 0;
-                }
-                bannerLayout.setLayoutParams(params);
-
-                // Add to layout (initially hidden)
-                bannerLayout.addView(bannerAdView);
-                bannerAdView.setVisibility(View.INVISIBLE);
-
-                // Set event listener
-                bannerAdView.setBannerAdEventListener(new BannerAdEventListener() {
+                view.setBannerAdEventListener(new BannerAdEventListener() {
                     @Override
                     public void onAdLoaded() {
-                        Log.d(TAG, "Banner ad loaded: " + adUnitId);
+                        Log.d(TAG, "Banner loaded: " + adUnitId);
+                        // Колбэк мог прийти после гибели activity - иначе утечка.
+                        if (activity.isDestroyed()) {
+                            destroyBannerView();
+                            settleLoadCall(loadCall, false, "Activity destroyed");
+                            return;
+                        }
                         notifyAdEvent("banner", "loaded", adUnitId, null, null);
-
-                        JSObject ret = new JSObject();
-                        ret.put("success", true);
-                        call.resolve(ret);
+                        settleLoadCall(loadCall, true, null);
                     }
 
                     @Override
-                    public void onAdFailedToLoad(AdRequestError error) {
-                        Log.e(TAG, "Banner ad failed to load: " + error.getDescription());
-
-                        JSObject errorObj = createErrorObject(error);
-                        notifyAdEvent("banner", "failed_to_load", adUnitId, errorObj, null);
-
-                        JSObject ret = new JSObject();
-                        ret.put("success", false);
-                        ret.put("message", error.getDescription());
-                        call.resolve(ret);
+                    public void onAdFailedToLoad(@NonNull AdRequestError error) {
+                        Log.e(TAG, "Banner failed to load: " + error.getDescription());
+                        notifyAdEvent("banner", "failed_to_load", adUnitId, errorObject(error), null);
+                        settleLoadCall(loadCall, false, error.getDescription());
                     }
 
                     @Override
                     public void onAdClicked() {
-                        Log.d(TAG, "Banner ad clicked");
                         notifyAdEvent("banner", "clicked", adUnitId, null, null);
                     }
 
                     @Override
-                    public void onLeftApplication() {
-                        Log.d(TAG, "Banner ad left application");
-                        notifyAdEvent("banner", "left_application", adUnitId, null, null);
-                    }
-
-                    @Override
-                    public void onReturnedToApplication() {
-                        Log.d(TAG, "Banner ad returned to application");
-                        notifyAdEvent("banner", "returned_to_application", adUnitId, null, null);
-                    }
-
-                    @Override
                     public void onImpression(@Nullable ImpressionData impressionData) {
-                        Log.d(TAG, "Banner ad impression");
                         notifyAdEvent("banner", "impression", adUnitId, null, null);
                     }
                 });
 
-                // Load ad
-                AdRequest adRequest = new AdRequest.Builder().build();
-                bannerAdView.loadAd(adRequest);
+                bannerAdView = view;
+                bannerLayout.addView(view);
+                view.setVisibility(View.INVISIBLE);
 
+                // Идентификатор блока теперь часть запроса, а не свойство view.
+                view.loadAd(new AdRequest.Builder(adUnitId).build());
             } catch (Exception e) {
                 Log.e(TAG, "Error loading banner: " + e.getMessage());
-                call.reject("Error loading banner: " + e.getMessage());
+                settleLoadCall(loadCall, false, e.getMessage());
             }
         });
     }
 
-    /**
-     * Show the loaded banner ad
-     */
     @PluginMethod
     public void showBanner(PluginCall call) {
-        if (!isInitialized) {
-            rejectNotInitialized(call);
-            return;
-        }
-
-        if (bannerAdView == null) {
-            JSObject ret = new JSObject();
-            ret.put("success", false);
-            ret.put("message", "Banner not loaded");
-            call.resolve(ret);
-            return;
-        }
-
-        AppCompatActivity activity = getActivity();
-        activity.runOnUiThread(() -> {
-            bannerAdView.setVisibility(View.VISIBLE);
-            notifyAdEvent("banner", "shown", bannerAdUnitId, null, null);
-
-            JSObject ret = new JSObject();
-            ret.put("success", true);
-            call.resolve(ret);
-        });
+        if (notInitialized(call)) return;
+        setBannerVisible(call, true);
     }
 
-    /**
-     * Hide the banner ad
-     */
     @PluginMethod
     public void hideBanner(PluginCall call) {
-        if (!isInitialized) {
-            rejectNotInitialized(call);
-            return;
-        }
+        if (notInitialized(call)) return;
+        setBannerVisible(call, false);
+    }
 
-        if (bannerAdView == null) {
-            JSObject ret = new JSObject();
-            ret.put("success", false);
-            ret.put("message", "Banner not loaded");
-            call.resolve(ret);
-            return;
-        }
-
+    /**
+     * Проверять bannerAdView здесь, на потоке моста, бесполезно: параллельный
+     * destroyBanner()/loadBanner() успеет обнулить его до того, как выполнится
+     * наш runnable. Поэтому берём ссылку уже на UI-потоке.
+     */
+    private void setBannerVisible(PluginCall call, boolean isVisible) {
         AppCompatActivity activity = getActivity();
-        activity.runOnUiThread(() -> {
-            bannerAdView.setVisibility(View.INVISIBLE);
-            notifyAdEvent("banner", "dismissed", bannerAdUnitId, null, null);
+        if (activity == null) {
+            resolveFail(call, "Activity is gone");
+            return;
+        }
 
-            JSObject ret = new JSObject();
-            ret.put("success", true);
-            call.resolve(ret);
+        activity.runOnUiThread(() -> {
+            BannerAdView view = bannerAdView;
+            if (view == null) {
+                resolveFail(call, "Banner not loaded");
+                return;
+            }
+            view.setVisibility(isVisible ? View.VISIBLE : View.INVISIBLE);
+            notifyAdEvent("banner", isVisible ? "shown" : "dismissed", bannerAdUnitId, null, null);
+            resolveOk(call, null);
         });
     }
 
-    /**
-     * Destroy the banner ad
-     */
     @PluginMethod
     public void destroyBanner(PluginCall call) {
-        if (bannerAdView != null) {
-            AppCompatActivity activity = getActivity();
-            activity.runOnUiThread(() -> {
-                bannerAdView.destroy();
-                bannerLayout.removeAllViews();
-                bannerAdView = null;
-                bannerAdUnitId = null;
-
-                JSObject ret = new JSObject();
-                ret.put("success", true);
-                call.resolve(ret);
-            });
-        } else {
-            JSObject ret = new JSObject();
-            ret.put("success", true);
-            ret.put("message", "No banner to destroy");
-            call.resolve(ret);
-        }
-    }
-
-    /**
-     * Load an interstitial ad
-     */
-    @PluginMethod
-    public void loadInterstitial(PluginCall call) {
-        if (!isInitialized) {
-            rejectNotInitialized(call);
+        AppCompatActivity activity = getActivity();
+        if (activity == null) {
+            destroyBannerView();
+            resolveOk(call, null);
             return;
         }
+        activity.runOnUiThread(() -> {
+            destroyBannerView();
+            resolveOk(call, null);
+        });
+    }
+
+    // MARK: - Interstitial
+
+    @PluginMethod
+    public void loadInterstitial(PluginCall call) {
+        if (notInitialized(call)) return;
 
         String adUnitId = call.getString("adUnitId");
         if (adUnitId == null || adUnitId.isEmpty()) {
@@ -341,132 +312,140 @@ public class YandexAdsPlugin extends Plugin {
         }
 
         interstitialAdUnitId = adUnitId;
-        isInterstitialLoaded = false;
+        // Загрузчик держит один запрос: новый вызов отменяет предыдущий, и его
+        // слушатель уже не сработает - закрываем то обещание сами.
+        settleAndClearInterstitialLoad(false, "Superseded by a new loadInterstitial() call");
+        final PluginCall loadCall = hold(call);
+        pendingInterstitialLoadCall = loadCall;
 
         AppCompatActivity activity = getActivity();
+        if (activity == null) {
+            settleAndClearInterstitialLoad(false, "Activity is gone");
+            return;
+        }
         activity.runOnUiThread(() -> {
             try {
-                interstitialAd = new InterstitialAd(activity);
-                interstitialAd.setAdUnitId(adUnitId);
+                if (interstitialLoader == null) {
+                    // Один загрузчик на всё время жизни плагина - так советует
+                    // документация, это быстрее повторного создания.
+                    interstitialLoader = new InterstitialAdLoader(activity);
+                }
 
-                interstitialAd.setInterstitialAdEventListener(new InterstitialAdEventListener() {
-                    @Override
-                    public void onAdLoaded() {
-                        Log.d(TAG, "Interstitial ad loaded: " + adUnitId);
-                        isInterstitialLoaded = true;
-                        notifyAdEvent("interstitial", "loaded", adUnitId, null, null);
+                destroyInterstitialAd();
 
-                        JSObject ret = new JSObject();
-                        ret.put("success", true);
-                        call.resolve(ret);
+                // В SDK 8 слушатель передаётся прямо в loadAd, поэтому вызов
+                // JS-стороны захватывается замыканием и гонок между
+                // параллельными загрузками нет.
+                interstitialLoader.loadAd(
+                    new AdRequest.Builder(adUnitId).build(),
+                    new InterstitialAdLoadListener() {
+                        @Override
+                        public void onAdLoaded(@NonNull InterstitialAd ad) {
+                            Log.d(TAG, "Interstitial loaded: " + adUnitId);
+                            interstitialAd = ad;
+                            notifyAdEvent("interstitial", "loaded", adUnitId, null, null);
+                            settleLoadCall(loadCall, true, null);
+                        }
+
+                        @Override
+                        public void onAdFailedToLoad(@NonNull AdRequestError error) {
+                            Log.e(TAG, "Interstitial failed to load: " + error.getDescription());
+                            interstitialAd = null;
+                            notifyAdEvent("interstitial", "failed_to_load", adUnitId, errorObject(error), null);
+                            settleLoadCall(loadCall, false, error.getDescription());
+                        }
                     }
-
-                    @Override
-                    public void onAdFailedToLoad(AdRequestError error) {
-                        Log.e(TAG, "Interstitial ad failed to load: " + error.getDescription());
-                        isInterstitialLoaded = false;
-
-                        JSObject errorObj = createErrorObject(error);
-                        notifyAdEvent("interstitial", "failed_to_load", adUnitId, errorObj, null);
-
-                        JSObject ret = new JSObject();
-                        ret.put("success", false);
-                        ret.put("message", error.getDescription());
-                        call.resolve(ret);
-                    }
-
-                    @Override
-                    public void onAdShown() {
-                        Log.d(TAG, "Interstitial ad shown");
-                        notifyAdEvent("interstitial", "shown", adUnitId, null, null);
-                    }
-
-                    @Override
-                    public void onAdDismissed() {
-                        Log.d(TAG, "Interstitial ad dismissed");
-                        isInterstitialLoaded = false;
-                        notifyAdEvent("interstitial", "dismissed", adUnitId, null, null);
-                    }
-
-                    @Override
-                    public void onAdClicked() {
-                        Log.d(TAG, "Interstitial ad clicked");
-                        notifyAdEvent("interstitial", "clicked", adUnitId, null, null);
-                    }
-
-                    @Override
-                    public void onLeftApplication() {
-                        Log.d(TAG, "Interstitial ad left application");
-                        notifyAdEvent("interstitial", "left_application", adUnitId, null, null);
-                    }
-
-                    @Override
-                    public void onReturnedToApplication() {
-                        Log.d(TAG, "Interstitial ad returned to application");
-                        notifyAdEvent("interstitial", "returned_to_application", adUnitId, null, null);
-                    }
-
-                    @Override
-                    public void onImpression(@Nullable ImpressionData impressionData) {
-                        Log.d(TAG, "Interstitial ad impression");
-                        notifyAdEvent("interstitial", "impression", adUnitId, null, null);
-                    }
-                });
-
-                AdRequest adRequest = new AdRequest.Builder().build();
-                interstitialAd.loadAd(adRequest);
-
+                );
             } catch (Exception e) {
                 Log.e(TAG, "Error loading interstitial: " + e.getMessage());
-                call.reject("Error loading interstitial: " + e.getMessage());
+                settleLoadCall(loadCall, false, e.getMessage());
             }
         });
     }
 
-    /**
-     * Show the loaded interstitial ad
-     */
     @PluginMethod
     public void showInterstitial(PluginCall call) {
-        if (!isInitialized) {
-            rejectNotInitialized(call);
+        if (notInitialized(call)) return;
+
+        if (interstitialAd == null) {
+            resolveFail(call, "Interstitial not loaded");
             return;
         }
 
-        if (interstitialAd == null || !isInterstitialLoaded) {
-            JSObject ret = new JSObject();
-            ret.put("success", false);
-            ret.put("message", "Interstitial not loaded");
-            call.resolve(ret);
-            return;
-        }
+        settleInterstitialShow(false, "Superseded by a new showInterstitial() call");
+        pendingInterstitialShowCall = hold(call);
 
         AppCompatActivity activity = getActivity();
+        if (activity == null) {
+            settleInterstitialShow(false, "Activity is gone");
+            return;
+        }
         activity.runOnUiThread(() -> {
-            try {
-                interstitialAd.show();
-                JSObject ret = new JSObject();
-                ret.put("success", true);
-                call.resolve(ret);
-            } catch (Exception e) {
-                Log.e(TAG, "Error showing interstitial: " + e.getMessage());
-                JSObject ret = new JSObject();
-                ret.put("success", false);
-                ret.put("message", e.getMessage());
-                call.resolve(ret);
+            InterstitialAd ad = interstitialAd;
+            if (ad == null) {
+                settleInterstitialShow(false, "Interstitial not loaded");
+                return;
             }
+
+            ad.setAdEventListener(new InterstitialAdEventListener() {
+                @Override
+                public void onAdShown() {
+                    notifyAdEvent("interstitial", "shown", interstitialAdUnitId, null, null);
+                    // Отвечаем по факту показа, а не по факту вызова show().
+                    settleInterstitialShow(true, null);
+                }
+
+                @Override
+                public void onAdFailedToShow(@NonNull AdError adError) {
+                    Log.e(TAG, "Interstitial failed to show: " + adError.getDescription());
+                    notifyAdEvent("interstitial", "failed_to_show", interstitialAdUnitId,
+                        errorObject(0, adError.getDescription()), null);
+                    destroyInterstitialAd();
+                    settleInterstitialShow(false, adError.getDescription());
+                }
+
+                @Override
+                public void onAdDismissed() {
+                    notifyAdEvent("interstitial", "dismissed", interstitialAdUnitId, null, null);
+                    // Показанный объект переиспользовать нельзя - освобождаем.
+                    destroyInterstitialAd();
+                }
+
+                @Override
+                public void onAdClicked() {
+                    notifyAdEvent("interstitial", "clicked", interstitialAdUnitId, null, null);
+                }
+
+                @Override
+                public void onAdImpression(@Nullable ImpressionData impressionData) {
+                    notifyAdEvent("interstitial", "impression", interstitialAdUnitId, null, null);
+                }
+            });
+
+            ad.show(activity);
         });
     }
 
-    /**
-     * Load a rewarded ad
-     */
+    @PluginMethod
+    public void isInterstitialLoaded(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("loaded", interstitialAd != null);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void destroyInterstitial(PluginCall call) {
+        getActivity().runOnUiThread(() -> {
+            destroyInterstitialAd();
+            resolveOk(call, null);
+        });
+    }
+
+    // MARK: - Rewarded
+
     @PluginMethod
     public void loadRewarded(PluginCall call) {
-        if (!isInitialized) {
-            rejectNotInitialized(call);
-            return;
-        }
+        if (notInitialized(call)) return;
 
         String adUnitId = call.getString("adUnitId");
         if (adUnitId == null || adUnitId.isEmpty()) {
@@ -475,192 +454,361 @@ public class YandexAdsPlugin extends Plugin {
         }
 
         rewardedAdUnitId = adUnitId;
-        isRewardedLoaded = false;
-        lastReward = null;
+        settleAndClearRewardedLoad(false, "Superseded by a new loadRewarded() call");
+        final PluginCall loadCall = hold(call);
+        pendingRewardedLoadCall = loadCall;
 
         AppCompatActivity activity = getActivity();
+        if (activity == null) {
+            settleAndClearRewardedLoad(false, "Activity is gone");
+            return;
+        }
         activity.runOnUiThread(() -> {
             try {
-                rewardedAd = new RewardedAd(activity);
-                rewardedAd.setAdUnitId(adUnitId);
+                if (rewardedLoader == null) {
+                    rewardedLoader = new RewardedAdLoader(activity);
+                }
 
-                rewardedAd.setRewardedAdEventListener(new RewardedAdEventListener() {
-                    @Override
-                    public void onAdLoaded() {
-                        Log.d(TAG, "Rewarded ad loaded: " + adUnitId);
-                        isRewardedLoaded = true;
-                        notifyAdEvent("rewarded", "loaded", adUnitId, null, null);
+                destroyRewardedAd();
+                lastReward = null;
 
-                        JSObject ret = new JSObject();
-                        ret.put("success", true);
-                        call.resolve(ret);
+                rewardedLoader.loadAd(
+                    new AdRequest.Builder(adUnitId).build(),
+                    new RewardedAdLoadListener() {
+                        @Override
+                        public void onAdLoaded(@NonNull RewardedAd ad) {
+                            Log.d(TAG, "Rewarded loaded: " + adUnitId);
+                            rewardedAd = ad;
+                            notifyAdEvent("rewarded", "loaded", adUnitId, null, null);
+                            settleLoadCall(loadCall, true, null);
+                        }
+
+                        @Override
+                        public void onAdFailedToLoad(@NonNull AdRequestError error) {
+                            Log.e(TAG, "Rewarded failed to load: " + error.getDescription());
+                            rewardedAd = null;
+                            notifyAdEvent("rewarded", "failed_to_load", adUnitId, errorObject(error), null);
+                            settleLoadCall(loadCall, false, error.getDescription());
+                        }
                     }
-
-                    @Override
-                    public void onAdFailedToLoad(AdRequestError error) {
-                        Log.e(TAG, "Rewarded ad failed to load: " + error.getDescription());
-                        isRewardedLoaded = false;
-
-                        JSObject errorObj = createErrorObject(error);
-                        notifyAdEvent("rewarded", "failed_to_load", adUnitId, errorObj, null);
-
-                        JSObject ret = new JSObject();
-                        ret.put("success", false);
-                        ret.put("message", error.getDescription());
-                        call.resolve(ret);
-                    }
-
-                    @Override
-                    public void onRewarded(Reward reward) {
-                        Log.d(TAG, "Rewarded ad reward received: " + reward.getAmount() + " " + reward.getType());
-                        lastReward = reward;
-
-                        JSObject rewardObj = new JSObject();
-                        rewardObj.put("amount", reward.getAmount());
-                        rewardObj.put("type", reward.getType());
-
-                        notifyAdEvent("rewarded", "rewarded", adUnitId, null, rewardObj);
-                    }
-
-                    @Override
-                    public void onAdShown() {
-                        Log.d(TAG, "Rewarded ad shown");
-                        notifyAdEvent("rewarded", "shown", adUnitId, null, null);
-                    }
-
-                    @Override
-                    public void onAdDismissed() {
-                        Log.d(TAG, "Rewarded ad dismissed");
-                        isRewardedLoaded = false;
-                        notifyAdEvent("rewarded", "dismissed", adUnitId, null, null);
-                    }
-
-                    @Override
-                    public void onAdClicked() {
-                        Log.d(TAG, "Rewarded ad clicked");
-                        notifyAdEvent("rewarded", "clicked", adUnitId, null, null);
-                    }
-
-                    @Override
-                    public void onLeftApplication() {
-                        Log.d(TAG, "Rewarded ad left application");
-                        notifyAdEvent("rewarded", "left_application", adUnitId, null, null);
-                    }
-
-                    @Override
-                    public void onReturnedToApplication() {
-                        Log.d(TAG, "Rewarded ad returned to application");
-                        notifyAdEvent("rewarded", "returned_to_application", adUnitId, null, null);
-                    }
-
-                    @Override
-                    public void onImpression(@Nullable ImpressionData impressionData) {
-                        Log.d(TAG, "Rewarded ad impression");
-                        notifyAdEvent("rewarded", "impression", adUnitId, null, null);
-                    }
-                });
-
-                AdRequest adRequest = new AdRequest.Builder().build();
-                rewardedAd.loadAd(adRequest);
-
+                );
             } catch (Exception e) {
-                Log.e(TAG, "Error loading rewarded ad: " + e.getMessage());
-                call.reject("Error loading rewarded ad: " + e.getMessage());
+                Log.e(TAG, "Error loading rewarded: " + e.getMessage());
+                settleLoadCall(loadCall, false, e.getMessage());
             }
         });
+    }
+
+    @PluginMethod
+    public void showRewarded(PluginCall call) {
+        if (notInitialized(call)) return;
+
+        if (rewardedAd == null) {
+            resolveFail(call, "Rewarded ad not loaded");
+            return;
+        }
+
+        settleRewardedShow(false, null, "Superseded by a new showRewarded() call");
+        // Награда прошлого показа не должна засчитаться этому.
+        lastReward = null;
+        pendingRewardedShowCall = hold(call);
+
+        AppCompatActivity activity = getActivity();
+        if (activity == null) {
+            settleRewardedShow(false, null, "Activity is gone");
+            return;
+        }
+        activity.runOnUiThread(() -> {
+            RewardedAd ad = rewardedAd;
+            if (ad == null) {
+                settleRewardedShow(false, null, "Rewarded ad not loaded");
+                return;
+            }
+
+            ad.setAdEventListener(new RewardedAdEventListener() {
+                @Override
+                public void onAdShown() {
+                    notifyAdEvent("rewarded", "shown", rewardedAdUnitId, null, null);
+                }
+
+                @Override
+                public void onAdFailedToShow(@NonNull AdError adError) {
+                    Log.e(TAG, "Rewarded failed to show: " + adError.getDescription());
+                    notifyAdEvent("rewarded", "failed_to_show", rewardedAdUnitId,
+                        errorObject(0, adError.getDescription()), null);
+                    destroyRewardedAd();
+                    // Ролика не было - попытку сжигать нельзя.
+                    settleRewardedShow(false, null, adError.getDescription());
+                }
+
+                @Override
+                public void onRewarded(@NonNull Reward reward) {
+                    Log.d(TAG, "Rewarded: " + reward.getAmount() + " " + reward.getType());
+                    lastReward = reward;
+
+                    JSObject rewardObj = new JSObject();
+                    rewardObj.put("amount", reward.getAmount());
+                    rewardObj.put("type", reward.getType());
+                    notifyAdEvent("rewarded", "rewarded", rewardedAdUnitId, null, rewardObj);
+                }
+
+                @Override
+                public void onAdDismissed() {
+                    notifyAdEvent("rewarded", "dismissed", rewardedAdUnitId, null, null);
+                    // Только к закрытию ролика ясно, досмотрел его игрок или нет.
+                    settleRewardedShow(true, lastReward, null);
+                    destroyRewardedAd();
+                }
+
+                @Override
+                public void onAdClicked() {
+                    notifyAdEvent("rewarded", "clicked", rewardedAdUnitId, null, null);
+                }
+
+                @Override
+                public void onAdImpression(@Nullable ImpressionData impressionData) {
+                    notifyAdEvent("rewarded", "impression", rewardedAdUnitId, null, null);
+                }
+            });
+
+            ad.show(activity);
+        });
+    }
+
+    @PluginMethod
+    public void isRewardedLoaded(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("loaded", rewardedAd != null);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void destroyRewarded(PluginCall call) {
+        getActivity().runOnUiThread(() -> {
+            destroyRewardedAd();
+            resolveOk(call, null);
+        });
+    }
+
+    // MARK: - Helpers
+
+    /**
+     * Ширина sticky-баннера задаётся в dp. Ноль или отрицательное значение
+     * трактуем как "во всю ширину экрана".
+     */
+    private int resolveStickyWidthDp(@NonNull AppCompatActivity activity, int requestedWidth) {
+        if (requestedWidth > 0) return requestedWidth;
+        DisplayMetrics metrics = activity.getResources().getDisplayMetrics();
+        return Math.round(metrics.widthPixels / metrics.density);
+    }
+
+    private void applyBannerPosition(@NonNull AppCompatActivity activity, @Nullable String position) {
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) bannerLayout.getLayoutParams();
+        if ("top".equalsIgnoreCase(position)) {
+            params.gravity = Gravity.CENTER_HORIZONTAL | Gravity.TOP;
+            int statusBarHeight = 0;
+            int resourceId = activity.getResources().getIdentifier("status_bar_height", "dimen", "android");
+            if (resourceId > 0) {
+                statusBarHeight = activity.getResources().getDimensionPixelSize(resourceId);
+            }
+            params.topMargin = statusBarHeight;
+        } else {
+            params.gravity = Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM;
+            params.topMargin = 0;
+        }
+        bannerLayout.setLayoutParams(params);
+    }
+
+    private void destroyBannerView() {
+        // Слушателя больше не будет - ждущее обещание надо закрыть здесь,
+        // иначе оно повиснет навсегда.
+        settleAndClearBannerLoad(false, "Banner destroyed");
+
+        BannerAdView view = bannerAdView;
+        if (view == null) return;
+        bannerAdView = null;
+        view.setBannerAdEventListener(null);
+        view.destroy();
+        LinearLayout layout = bannerLayout;
+        if (layout != null) layout.removeAllViews();
+    }
+
+    // Документация требует снимать слушателя с показанного объявления, иначе
+    // объект и его слушатель остаются в памяти.
+    private void destroyInterstitialAd() {
+        InterstitialAd ad = interstitialAd;
+        if (ad == null) return;
+        interstitialAd = null;
+        ad.setAdEventListener(null);
+    }
+
+    private void destroyRewardedAd() {
+        RewardedAd ad = rewardedAd;
+        if (ad == null) return;
+        rewardedAd = null;
+        ad.setAdEventListener(null);
+    }
+
+    private void releaseAll() {
+        destroyBannerView();
+        destroyInterstitialAd();
+        destroyRewardedAd();
+
+        if (interstitialLoader != null) {
+            interstitialLoader.cancelLoading();
+            interstitialLoader = null;
+        }
+        if (rewardedLoader != null) {
+            rewardedLoader.cancelLoading();
+            rewardedLoader = null;
+        }
+
+        // Ни один колбэк больше не придёт: закрываем всё, что ждало ответа.
+        settleAndClearInterstitialLoad(false, "Plugin destroyed");
+        settleAndClearRewardedLoad(false, "Plugin destroyed");
+        settleInterstitialShow(false, "Plugin destroyed");
+        settleRewardedShow(false, null, "Plugin destroyed");
+    }
+
+    // Отложенный вызов гасим строго один раз: сначала снимаем ссылку, потом
+    // отвечаем, иначе повторный вход разрешил бы то же обещание дважды.
+    private void settleAndClearBannerLoad(boolean success, @Nullable String message) {
+        PluginCall call = pendingBannerLoadCall;
+        if (call == null) return;
+        pendingBannerLoadCall = null;
+        settle(call, success, message);
+    }
+
+    private void settleAndClearInterstitialLoad(boolean success, @Nullable String message) {
+        PluginCall call = pendingInterstitialLoadCall;
+        if (call == null) return;
+        pendingInterstitialLoadCall = null;
+        settle(call, success, message);
+    }
+
+    private void settleAndClearRewardedLoad(boolean success, @Nullable String message) {
+        PluginCall call = pendingRewardedLoadCall;
+        if (call == null) return;
+        pendingRewardedLoadCall = null;
+        settle(call, success, message);
+    }
+
+    private void settleInterstitialShow(boolean success, @Nullable String message) {
+        PluginCall call = pendingInterstitialShowCall;
+        if (call == null) return;
+        pendingInterstitialShowCall = null;
+        settle(call, success, message);
     }
 
     /**
-     * Show the loaded rewarded ad
+     * Отвечает конкретному вызову загрузки и заодно снимает его из поля, если
+     * поле всё ещё указывает на него. Слушатель обязан отвечать захваченному
+     * вызову, а не текущему полю: между запросом и колбэком поле могло смениться.
      */
-    @PluginMethod
-    public void showRewarded(PluginCall call) {
-        if (!isInitialized) {
-            rejectNotInitialized(call);
-            return;
-        }
-
-        if (rewardedAd == null || !isRewardedLoaded) {
-            JSObject ret = new JSObject();
-            ret.put("success", false);
-            ret.put("message", "Rewarded ad not loaded");
-            call.resolve(ret);
-            return;
-        }
-
-        AppCompatActivity activity = getActivity();
-        activity.runOnUiThread(() -> {
-            try {
-                rewardedAd.show();
-
-                // Wait a moment for reward callback
-                new android.os.Handler().postDelayed(() -> {
-                    JSObject ret = new JSObject();
-                    ret.put("success", true);
-
-                    if (lastReward != null) {
-                        ret.put("rewarded", true);
-                        JSObject rewardObj = new JSObject();
-                        rewardObj.put("amount", lastReward.getAmount());
-                        rewardObj.put("type", lastReward.getType());
-                        ret.put("reward", rewardObj);
-                    } else {
-                        ret.put("rewarded", false);
-                    }
-
-                    call.resolve(ret);
-                }, 100);
-
-            } catch (Exception e) {
-                Log.e(TAG, "Error showing rewarded ad: " + e.getMessage());
-                JSObject ret = new JSObject();
-                ret.put("success", false);
-                ret.put("message", e.getMessage());
-                call.resolve(ret);
-            }
-        });
+    private void settleLoadCall(@Nullable PluginCall call, boolean success, @Nullable String message) {
+        if (call == null) return;
+        if (pendingBannerLoadCall == call) pendingBannerLoadCall = null;
+        if (pendingInterstitialLoadCall == call) pendingInterstitialLoadCall = null;
+        if (pendingRewardedLoadCall == call) pendingRewardedLoadCall = null;
+        settle(call, success, message);
     }
 
-    // Helper methods
+    /**
+     * Отдаёт результат показа rewarded-ролика ровно один раз.
+     *
+     * shown=false означает "ролик не показали" - попытку сжигать нельзя;
+     * shown=true с rewarded=false означает "показали, но игрок прервал".
+     */
+    private void settleRewardedShow(boolean shown, @Nullable Reward reward, @Nullable String message) {
+        PluginCall call = pendingRewardedShowCall;
+        if (call == null) return;
+        pendingRewardedShowCall = null;
 
-    private void notifyAdEvent(String adType, String event, String adUnitId, JSObject error, JSObject reward) {
+        JSObject ret = new JSObject();
+        ret.put("success", shown);
+        if (message != null) ret.put("message", message);
+
+        if (shown) {
+            ret.put("rewarded", reward != null);
+            if (reward != null) {
+                JSObject rewardObj = new JSObject();
+                rewardObj.put("amount", reward.getAmount());
+                rewardObj.put("type", reward.getType());
+                ret.put("reward", rewardObj);
+            }
+        }
+
+        release(call, ret);
+    }
+
+    /** Удерживает вызов до прихода нативного колбэка. */
+    private PluginCall hold(PluginCall call) {
+        call.setKeepAlive(true);
+        return call;
+    }
+
+    private void settle(@Nullable PluginCall call, boolean success, @Nullable String message) {
+        if (call == null) return;
+        JSObject ret = new JSObject();
+        ret.put("success", success);
+        if (message != null) ret.put("message", message);
+        release(call, ret);
+    }
+
+    /**
+     * Снимаем удержание до ответа: тогда мост пришлёт save=false, JS-сторона
+     * освободит колбэк, а сам вызов освободится автоматически.
+     */
+    private void release(@NonNull PluginCall call, @NonNull JSObject ret) {
+        call.setKeepAlive(false);
+        call.resolve(ret);
+    }
+
+    private void notifyAdEvent(String adType, String event, @Nullable String adUnitId,
+                               @Nullable JSObject error, @Nullable JSObject reward) {
         JSObject eventData = new JSObject();
         eventData.put("adType", adType);
         eventData.put("event", event);
 
-        if (adUnitId != null) {
-            eventData.put("adUnitId", adUnitId);
-        }
-
-        if (error != null) {
-            eventData.put("error", error);
-        }
-
-        if (reward != null) {
-            eventData.put("reward", reward);
-        }
+        if (adUnitId != null) eventData.put("adUnitId", adUnitId);
+        if (error != null) eventData.put("error", error);
+        if (reward != null) eventData.put("reward", reward);
 
         notifyListeners("adEvent", eventData);
     }
 
-    private JSObject createErrorObject(AdRequestError error) {
+    private JSObject errorObject(@NonNull AdRequestError error) {
+        return errorObject(error.getCode(), error.getDescription());
+    }
+
+    private JSObject errorObject(int code, @Nullable String message) {
         JSObject errorObj = new JSObject();
-        errorObj.put("code", error.getCode());
-        errorObj.put("message", error.getDescription());
+        errorObj.put("code", code);
+        errorObj.put("message", message == null ? "" : message);
         return errorObj;
     }
 
-    private void rejectNotInitialized(PluginCall call) {
+    private boolean notInitialized(PluginCall call) {
+        if (isInitialized) return false;
+        resolveFail(call, "SDK not initialized. Call init() first.");
+        return true;
+    }
+
+    private void resolveOk(PluginCall call, @Nullable String message) {
+        JSObject ret = new JSObject();
+        ret.put("success", true);
+        if (message != null) ret.put("message", message);
+        call.resolve(ret);
+    }
+
+    private void resolveFail(PluginCall call, @Nullable String message) {
         JSObject ret = new JSObject();
         ret.put("success", false);
-        ret.put("message", "SDK not initialized. Call init() first.");
+        if (message != null) ret.put("message", message);
         call.resolve(ret);
     }
 
     private void rejectMissingParameter(PluginCall call, String paramName) {
-        JSObject ret = new JSObject();
-        ret.put("success", false);
-        ret.put("message", "Missing required parameter: " + paramName);
-        call.resolve(ret);
+        resolveFail(call, "Missing required parameter: " + paramName);
     }
 }

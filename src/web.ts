@@ -2,6 +2,7 @@ import { WebPlugin } from '@capacitor/core';
 
 import type {
   InitOptions,
+  AdLoadedResult,
   AdResult,
   LoadBannerOptions,
   LoadInterstitialOptions,
@@ -56,6 +57,22 @@ export class YandexAdsWeb extends WebPlugin {
 
   async showRewarded(): Promise<RewardedAdResult> {
     console.warn('YandexAds: showRewarded() is not available on web platform');
+    return { success: false, message: 'Not available on web' };
+  }
+
+  async isInterstitialLoaded(): Promise<AdLoadedResult> {
+    return { loaded: false };
+  }
+
+  async isRewardedLoaded(): Promise<AdLoadedResult> {
+    return { loaded: false };
+  }
+
+  async destroyInterstitial(): Promise<AdResult> {
+    return { success: false, message: 'Not available on web' };
+  }
+
+  async destroyRewarded(): Promise<AdResult> {
     return { success: false, message: 'Not available on web' };
   }
 }

@@ -1,7 +1,7 @@
 {
-  "name": "yandex-ads",
-  "version": "0.0.1",
-  "description": "yandex ads",
+  "name": "capacitor-yandex-ads",
+  "version": "0.2.0",
+  "description": "Capacitor plugin for Yandex Mobile Ads (banner, interstitial, rewarded)",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
   "types": "dist/esm/index.d.ts",
@@ -11,16 +11,16 @@
     "android/build.gradle",
     "dist/",
     "ios/Plugin/",
-    "YandexAds.podspec"
+    "CapacitorYandexAds.podspec"
   ],
   "author": "osova",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/osova/yandex-ads.git"
+    "url": "git+https://github.com/osov/capacitor-yandex-ads.git"
   },
   "bugs": {
-    "url": "https://github.com/osova/yandex-ads/issues"
+    "url": "https://github.com/osov/capacitor-yandex-ads/issues"
   },
   "keywords": [
     "capacitor",
@@ -41,7 +41,8 @@
     "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.js",
     "clean": "rimraf ./dist",
     "watch": "tsc --watch",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "@capacitor/android": "^7.0.0",

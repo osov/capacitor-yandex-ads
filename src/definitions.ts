@@ -22,8 +22,6 @@ export enum AdEventType {
   CLICKED = 'clicked',
   IMPRESSION = 'impression',
   REWARDED = 'rewarded',
-  LEFT_APPLICATION = 'left_application',
-  RETURNED_TO_APPLICATION = 'returned_to_application',
 }
 
 /**
@@ -141,8 +139,21 @@ export type YandexAdEvent =
  * Init options
  */
 export interface InitOptions {
-  /** Optional user consent for personalized ads (GDPR) */
+  /** User consent for personalized ads (GDPR). Applied before SDK init. */
   userConsent?: boolean;
+  /** Mark the user as age-restricted (COPPA). Applied before SDK init. */
+  ageRestrictedUser?: boolean;
+  /** Allow the SDK to use device location for targeting. */
+  locationTracking?: boolean;
+  /** Verbose SDK logging. Debug builds only. */
+  enableLogging?: boolean;
+}
+
+/**
+ * Result of a "is this slot ready to show" query.
+ */
+export interface AdLoadedResult {
+  loaded: boolean;
 }
 
 /**
@@ -229,10 +240,22 @@ export interface YandexAdsPlugin {
   loadInterstitial(options: LoadInterstitialOptions): Promise<AdResult>;
 
   /**
-   * Show a loaded interstitial ad
-   * @returns Promise that resolves when interstitial is shown
+   * Show a loaded interstitial ad.
+   * Resolves once the ad is actually on screen (`success: true`) or could not
+   * be shown (`success: false`). Use the `dismissed` event to learn when the
+   * user closed it.
    */
   showInterstitial(): Promise<AdResult>;
+
+  /**
+   * Whether an interstitial ad is loaded and ready to show.
+   */
+  isInterstitialLoaded(): Promise<AdLoadedResult>;
+
+  /**
+   * Release the loaded interstitial ad without showing it.
+   */
+  destroyInterstitial(): Promise<AdResult>;
 
   /**
    * Load a rewarded ad
@@ -242,10 +265,24 @@ export interface YandexAdsPlugin {
   loadRewarded(options: LoadRewardedOptions): Promise<AdResult>;
 
   /**
-   * Show a loaded rewarded ad
-   * @returns Promise that resolves when rewarded ad is shown
+   * Show a loaded rewarded ad.
+   *
+   * Resolves only once the ad is closed, so the outcome is final:
+   * - `success: false` - the ad was never shown; do not burn the user's attempt.
+   * - `success: true, rewarded: false` - shown, but the user skipped it.
+   * - `success: true, rewarded: true` - watched to the end; grant the reward.
    */
   showRewarded(): Promise<RewardedAdResult>;
+
+  /**
+   * Whether a rewarded ad is loaded and ready to show.
+   */
+  isRewardedLoaded(): Promise<AdLoadedResult>;
+
+  /**
+   * Release the loaded rewarded ad without showing it.
+   */
+  destroyRewarded(): Promise<AdResult>;
 
   /**
    * Add a listener for ad events
