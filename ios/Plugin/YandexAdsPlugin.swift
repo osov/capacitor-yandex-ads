@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import Capacitor
 import YandexMobileAds
 
@@ -68,17 +69,19 @@ public class YandexAdsPlugin: CAPPlugin {
         DispatchQueue.main.async { @MainActor [weak self] in
             guard let self = self else { return }
 
-            if self.isInitialized {
-                call.resolve(["success": true, "message": "Already initialized"])
-                return
-            }
-
-            // Политики приватности выставляются до инициализации SDK.
+            // Политики приватности применяем всегда, а не только до первой
+            // инициализации: повторный init() - это способ передать отзыв
+            // согласия, и ранний выход ниже терял бы его до перезапуска.
             if let userConsent = userConsent { YandexAds.setUserConsent(userConsent) }
             if let ageRestrictedUser = ageRestrictedUser { YandexAds.setAgeRestricted(ageRestrictedUser) }
             if let locationTracking = locationTracking { YandexAds.setLocationTracking(locationTracking) }
             // На iOS у enableLogging нет аргумента, в отличие от Android.
             if enableLogging { YandexAds.enableLogging() }
+
+            if self.isInitialized {
+                call.resolve(["success": true, "message": "Already initialized"])
+                return
+            }
 
             self.pendingInitCalls.append(call)
 
@@ -103,9 +106,8 @@ public class YandexAdsPlugin: CAPPlugin {
             guard !self.isInitializing else { return }
             self.isInitializing = true
 
-            // Колбэк помечен @Sendable: ничего не захватываем и сразу
-            // возвращаемся на главный поток. Захват self даже слабый сделал бы
-            // замыкание несендабельным.
+            // Колбэк помечен @Sendable, поэтому self захватывается слабо и всё
+            // состояние трогается уже после возврата на главный поток.
             YandexAds.initializeSDK {
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
@@ -136,8 +138,9 @@ public class YandexAdsPlugin: CAPPlugin {
             resolveFail(call, "Missing required parameter: size")
             return
         }
-        // Через мост число приезжает как NSNumber: приведение к Int сорвалось бы
-        // на нецелом значении, тогда как Android его округляет. Берём NSNumber.
+        // Через мост число приезжает как NSNumber: прямое приведение к Int
+        // сорвалось бы на нецелом значении. intValue усекает дробную часть -
+        // ровно как Number.intValue() на Android.
         guard let width = (sizeObj["width"] as? NSNumber)?.intValue else {
             resolveFail(call, "Missing required parameter: size.width")
             return
@@ -284,11 +287,12 @@ public class YandexAdsPlugin: CAPPlugin {
             guard let self = self else { return }
             guard self.checkInitialized(call) else { return }
 
-            // Проверка по объявлению на экране, а не по ждущему вызову: вызов
-            // закрывается уже в didShow, когда реклама ещё видна.
-            guard self.showingInterstitialAd == nil else {
-                self.resolveFail(call, "Interstitial is being shown")
-                return
+            // Прошлый показ, не отчитавшийся ни одним колбэком, не должен
+            // блокировать рекламу до пятиминутного сторожа: вытесняем его, как
+            // это делает Android.
+            if self.showingInterstitialAd != nil {
+                self.showingInterstitialAd = nil
+                self.settleInterstitialShow(shown: false, message: "Superseded by a new showInterstitial() call")
             }
             guard let ad = self.interstitialAd else {
                 self.resolveFail(call, "Interstitial not loaded")
@@ -383,9 +387,9 @@ public class YandexAdsPlugin: CAPPlugin {
             guard let self = self else { return }
             guard self.checkInitialized(call) else { return }
 
-            guard self.showingRewardedAd == nil else {
-                self.resolveFail(call, "Rewarded ad is being shown")
-                return
+            if self.showingRewardedAd != nil {
+                self.showingRewardedAd = nil
+                self.settleRewardedShow(shown: false, reward: nil, message: "Superseded by a new showRewarded() call")
             }
             guard let ad = self.rewardedAd else {
                 self.resolveFail(call, "Rewarded ad not loaded")
@@ -492,8 +496,8 @@ public class YandexAdsPlugin: CAPPlugin {
     /// showingInterstitialAd осталось бы занятым, а показ - заблокированным
     /// до конца сессии.
     private func armInterstitialWatchdog(_ ad: InterstitialAd) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.showTimeout) { [weak self] in
-            guard let self = self else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.showTimeout) { [weak self, weak ad] in
+            guard let self = self, let ad = ad else { return }
             guard self.showingInterstitialAd === ad else { return }
             self.showingInterstitialAd = nil
             self.settleInterstitialShow(shown: false, message: "Show timeout")
@@ -501,8 +505,8 @@ public class YandexAdsPlugin: CAPPlugin {
     }
 
     private func armRewardedWatchdog(_ ad: RewardedAd) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.showTimeout) { [weak self] in
-            guard let self = self else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.showTimeout) { [weak self, weak ad] in
+            guard let self = self, let ad = ad else { return }
             guard self.showingRewardedAd === ad else { return }
             self.showingRewardedAd = nil
             // Награда могла прийти до того, как ролик потерялся, - тогда показ

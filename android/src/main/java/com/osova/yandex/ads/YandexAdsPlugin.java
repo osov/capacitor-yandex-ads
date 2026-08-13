@@ -14,6 +14,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import android.os.Handler;
 import android.os.Looper;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.getcapacitor.JSObject;
@@ -76,6 +77,8 @@ public class YandexAdsPlugin extends Plugin {
     // Вызов init() тоже отложенный: без этого его обещание не закрывал бы никто
     // при уничтожении плагина, а сторож снимается вместе с остальными задачами.
     private final AtomicReference<PluginCall> pendingInitCall = new AtomicReference<>();
+    // Событие об успешной инициализации шлём один раз за процесс.
+    private final AtomicBoolean isInitEventSent = new AtomicBoolean(false);
 
     // Banner
     private volatile BannerAdView bannerAdView;
@@ -161,34 +164,43 @@ public class YandexAdsPlugin extends Plugin {
                 settleOwnInit(initCall, false, "Activity is gone");
                 return;
             }
-            // Политики приватности выставляются до инициализации SDK.
-            if (userConsent != null) YandexAds.setUserConsent(userConsent);
-            if (ageRestrictedUser != null) YandexAds.setAgeRestricted(ageRestrictedUser);
-            if (locationTracking != null) YandexAds.setLocationTracking(locationTracking);
-            if (Boolean.TRUE.equals(enableLogging)) YandexAds.enableLogging(true);
 
-            // Начиная с SDK 8 библиотека поднимается сама при старте приложения;
-            // этот вызов лишь дожидается конца инициализации.
-            YandexAds.initialize(activity, () -> {
-                // Флаг ставим до проверки владения: SDK готов независимо от того,
-                // успели ли мы уже ответить по таймауту. Иначе поздний колбэк
-                // оставлял бы плагин "неинициализированным" навсегда.
-                isInitialized = true;
-                Log.d(TAG, "SDK initialized, version " + YandexAds.getLibraryVersion());
+            // Сторож ставим до обращения к SDK: если оно бросит исключение,
+            // вызов иначе остался бы незакрытым навсегда.
+            armInitWatchdog(initCall);
 
-                notifyAdEvent("init", "loaded", null, null, null);
-                if (!pendingInitCall.compareAndSet(initCall, null)) return;
-                settle(initCall, true, null);
-            });
+            try {
+                // Политики приватности выставляются до инициализации SDK.
+                if (userConsent != null) YandexAds.setUserConsent(userConsent);
+                if (ageRestrictedUser != null) YandexAds.setAgeRestricted(ageRestrictedUser);
+                if (locationTracking != null) YandexAds.setLocationTracking(locationTracking);
+                if (Boolean.TRUE.equals(enableLogging)) YandexAds.enableLogging(true);
 
-            // Без сети колбэк может не прийти вовсе - не держим вызов вечно.
-            mainHandler.postDelayed(() -> {
-                if (!pendingInitCall.compareAndSet(initCall, null)) return;
+                // Начиная с SDK 8 библиотека поднимается сама при старте
+                // приложения; этот вызов лишь дожидается конца инициализации.
+                YandexAds.initialize(activity, () -> {
+                    // Флаг ставим до проверки владения: SDK готов независимо от
+                    // того, успели ли мы уже ответить по таймауту. Иначе поздний
+                    // колбэк оставлял бы плагин "неинициализированным" навсегда.
+                    isInitialized = true;
+                    Log.d(TAG, "SDK initialized, version " + YandexAds.getLibraryVersion());
 
-                Log.w(TAG, "SDK init timed out");
-                notifyAdEvent("init", "failed_to_load", null, errorObject(0, "Initialization timeout"), null);
-                settle(initCall, false, "Initialization timeout");
-            }, INIT_TIMEOUT_MS);
+                    // Событие - ровно одно за процесс: слушателей SDK может быть
+                    // несколько (два параллельных init() регистрируют каждый
+                    // свой, и снять чужой нечем), а игра по этому событию
+                    // запускает предзагрузку.
+                    if (isInitEventSent.compareAndSet(false, true)) {
+                        notifyAdEvent("init", "loaded", null, null, null);
+                    }
+                    if (!pendingInitCall.compareAndSet(initCall, null)) return;
+                    settle(initCall, true, null);
+                });
+            } catch (Exception e) {
+                // Исключение с главного потока Capacitor не ловит - оно роняет
+                // процесс. Отвечаем отказом, как и на любой другой сбой.
+                Log.e(TAG, "Error initializing SDK: " + e.getMessage());
+                settleOwnInit(initCall, false, e.getMessage());
+            }
         });
     }
 
@@ -232,6 +244,14 @@ public class YandexAdsPlugin extends Plugin {
             return;
         }
         activity.runOnUiThread(() -> {
+            // Загрузку могли закрыть, пока раннабл ждал очереди UI-потока
+            // (destroyBanner, releaseAll или следующий loadBanner). Тогда вешать
+            // новую вью нельзя: убрать её потом будет некому.
+            if (pendingBannerLoadCall.get() != loadCall) return;
+            if (isActivityGone()) {
+                settleLoadCall(loadCall, false, "Activity is gone");
+                return;
+            }
             try {
                 destroyBannerView();
 
@@ -388,6 +408,10 @@ public class YandexAdsPlugin extends Plugin {
                         @Override
                         public void onAdLoaded(@NonNull InterstitialAd ad) {
                             Log.d(TAG, "Interstitial loaded: " + adUnitId);
+                            // Эта загрузка могла быть вытеснена следующей:
+                            // cancelLoading() не отзывает уже поставленный в
+                            // очередь колбэк, и объявление подменило бы текущее.
+                            if (pendingInterstitialLoadCall.get() != loadCall) return;
                             interstitialAd = ad;
                             notifyAdEvent("interstitial", "loaded", adUnitId, null, null);
                             settleLoadCall(loadCall, true, null);
@@ -396,6 +420,7 @@ public class YandexAdsPlugin extends Plugin {
                         @Override
                         public void onAdFailedToLoad(@NonNull AdRequestError error) {
                             Log.e(TAG, "Interstitial failed to load: " + error.getDescription());
+                            if (pendingInterstitialLoadCall.get() != loadCall) return;
                             interstitialAd = null;
                             notifyAdEvent("interstitial", "failed_to_load", adUnitId, errorObject(error), null);
                             settleLoadCall(loadCall, false, error.getDescription());
@@ -495,7 +520,8 @@ public class YandexAdsPlugin extends Plugin {
     @PluginMethod
     public void isInterstitialLoaded(PluginCall call) {
         if (isGone(call)) return;
-        if (notInitialized(call)) return;
+        // Без поднятого SDK объявления нет, но ответ обязан быть той же формы:
+        // в типе плагина поле loaded объявлено обязательным.
         JSObject ret = new JSObject();
         ret.put("loaded", interstitialAd != null);
         call.resolve(ret);
@@ -506,7 +532,9 @@ public class YandexAdsPlugin extends Plugin {
         if (isGone(call)) return;
         // Слушателя сейчас снимут - ждущий показ иначе висел бы до сторожа.
         settleInterstitialShow(false, "Interstitial destroyed");
+        settleAndClearInterstitialLoad(false, "Interstitial destroyed");
         runOnUi(() -> {
+            if (interstitialLoader != null) interstitialLoader.cancelLoading();
             destroyInterstitialAd();
             releaseShowingInterstitial(showingInterstitialAd);
             resolveOk(call, null);
@@ -552,6 +580,7 @@ public class YandexAdsPlugin extends Plugin {
                         @Override
                         public void onAdLoaded(@NonNull RewardedAd ad) {
                             Log.d(TAG, "Rewarded loaded: " + adUnitId);
+                            if (pendingRewardedLoadCall.get() != loadCall) return;
                             rewardedAd = ad;
                             notifyAdEvent("rewarded", "loaded", adUnitId, null, null);
                             settleLoadCall(loadCall, true, null);
@@ -560,6 +589,7 @@ public class YandexAdsPlugin extends Plugin {
                         @Override
                         public void onAdFailedToLoad(@NonNull AdRequestError error) {
                             Log.e(TAG, "Rewarded failed to load: " + error.getDescription());
+                            if (pendingRewardedLoadCall.get() != loadCall) return;
                             rewardedAd = null;
                             notifyAdEvent("rewarded", "failed_to_load", adUnitId, errorObject(error), null);
                             settleLoadCall(loadCall, false, error.getDescription());
@@ -668,7 +698,6 @@ public class YandexAdsPlugin extends Plugin {
     @PluginMethod
     public void isRewardedLoaded(PluginCall call) {
         if (isGone(call)) return;
-        if (notInitialized(call)) return;
         JSObject ret = new JSObject();
         ret.put("loaded", rewardedAd != null);
         call.resolve(ret);
@@ -678,7 +707,9 @@ public class YandexAdsPlugin extends Plugin {
     public void destroyRewarded(PluginCall call) {
         if (isGone(call)) return;
         settleRewardedShow(false, null, "Rewarded ad destroyed");
+        settleAndClearRewardedLoad(false, "Rewarded ad destroyed");
         runOnUi(() -> {
+            if (rewardedLoader != null) rewardedLoader.cancelLoading();
             destroyRewardedAd();
             releaseShowingRewarded(showingRewardedAd);
             resolveOk(call, null);
@@ -747,11 +778,15 @@ public class YandexAdsPlugin extends Plugin {
     }
 
     /**
-     * Выполняет действие на UI-потоке. Activity к этому моменту может быть уже
-     * уничтожена, а методы плагина Capacitor зовёт на своём потоке: без этого
-     * запасного пути getActivity() дал бы NPE, а работа с View -
-     * CalledFromWrongThreadException. Исключение, вылетевшее из метода плагина,
-     * Capacitor перебрасывает как RuntimeException и роняет процесс.
+     * Выполняет действие на UI-потоке.
+     *
+     * Методы плагина Capacitor зовёт на своём потоке, а работа с View оттуда
+     * даёт CalledFromWrongThreadException; исключение же, вылетевшее из метода
+     * плагина, Capacitor перебрасывает как RuntimeException и роняет процесс.
+     *
+     * Ветка с mainHandler - страховка на случай, если Bridge однажды начнёт
+     * отдавать null: сегодня getActivity() возвращает одно и то же final-поле и
+     * null не бывает (состояние activity проверяется через isActivityGone).
      */
     private void runOnUi(Runnable action) {
         AppCompatActivity activity = getActivity();
@@ -918,11 +953,27 @@ public class YandexAdsPlugin extends Plugin {
      */
     /** Через LOAD_TIMEOUT_MS закрывает обещание загрузки, если колбэка не было. */
     private void armLoadWatchdog(AtomicReference<PluginCall> holder, PluginCall call, String label) {
+        // Плагин мог быть разобран, пока метод шёл по очереди моста: тогда
+        // задачи уже сняты, и эта пережила бы уборку, удерживая activity.
+        if (isPluginDestroyed) {
+            settleOwnCall(holder, call, false, "Plugin destroyed");
+            return;
+        }
         mainHandler.postDelayed(() -> {
             if (holder.get() != call) return;
             Log.w(TAG, label + ": не дождались колбэка загрузки");
             settleOwnCall(holder, call, false, "Load timeout");
         }, LOAD_TIMEOUT_MS);
+    }
+
+    /** Без сети колбэк инициализации может не прийти вовсе - не держим вызов вечно. */
+    private void armInitWatchdog(PluginCall call) {
+        mainHandler.postDelayed(() -> {
+            if (!pendingInitCall.compareAndSet(call, null)) return;
+            Log.w(TAG, "SDK init timed out");
+            notifyAdEvent("init", "failed_to_load", null, errorObject(0, "Initialization timeout"), null);
+            settle(call, false, "Initialization timeout");
+        }, INIT_TIMEOUT_MS);
     }
 
     private void armInterstitialShowWatchdog(PluginCall call, InterstitialAd ad) {
