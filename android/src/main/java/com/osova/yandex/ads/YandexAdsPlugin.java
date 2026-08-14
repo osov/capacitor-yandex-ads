@@ -148,15 +148,26 @@ public class YandexAdsPlugin extends Plugin {
     @PluginMethod
     public void init(PluginCall call) {
         if (isGone(call)) return;
-        if (isInitialized) {
-            resolveOk(call, "Already initialized");
-            return;
-        }
 
         Boolean userConsent = call.getBoolean("userConsent");
         Boolean ageRestrictedUser = call.getBoolean("ageRestrictedUser");
         Boolean locationTracking = call.getBoolean("locationTracking");
         Boolean enableLogging = call.getBoolean("enableLogging");
+
+        if (isInitialized) {
+            // SDK уже поднят, но флаги применяем: согласие GDPR игра может
+            // привезти вторым init() после диалога, а сеттеры приватности
+            // Yandex-SDK принимает в любой момент, не только до инициализации.
+            runOnUi(() -> {
+                try {
+                    applyPrivacySettings(userConsent, ageRestrictedUser, locationTracking, enableLogging);
+                } catch (Exception e) {
+                    Log.e(TAG, "Error applying privacy settings: " + e.getMessage());
+                }
+                resolveOk(call, "Already initialized");
+            });
+            return;
+        }
 
         final PluginCall initCall = hold(call);
         settle(pendingInitCall.getAndSet(initCall), false, "Superseded by a new init() call");
@@ -174,10 +185,7 @@ public class YandexAdsPlugin extends Plugin {
 
             try {
                 // Политики приватности выставляются до инициализации SDK.
-                if (userConsent != null) YandexAds.setUserConsent(userConsent);
-                if (ageRestrictedUser != null) YandexAds.setAgeRestricted(ageRestrictedUser);
-                if (locationTracking != null) YandexAds.setLocationTracking(locationTracking);
-                if (Boolean.TRUE.equals(enableLogging)) YandexAds.enableLogging(true);
+                applyPrivacySettings(userConsent, ageRestrictedUser, locationTracking, enableLogging);
 
                 // Начиная с SDK 8 библиотека поднимается сама при старте
                 // приложения; этот вызов лишь дожидается конца инициализации.
@@ -205,6 +213,15 @@ public class YandexAdsPlugin extends Plugin {
                 settleOwnInit(initCall, false, e.getMessage());
             }
         });
+    }
+
+    /** Флаги приватности SDK принимает в любой момент, не только до init. */
+    private void applyPrivacySettings(@Nullable Boolean userConsent, @Nullable Boolean ageRestrictedUser,
+                                      @Nullable Boolean locationTracking, @Nullable Boolean enableLogging) {
+        if (userConsent != null) YandexAds.setUserConsent(userConsent);
+        if (ageRestrictedUser != null) YandexAds.setAgeRestricted(ageRestrictedUser);
+        if (locationTracking != null) YandexAds.setLocationTracking(locationTracking);
+        if (enableLogging != null) YandexAds.enableLogging(enableLogging);
     }
 
     // MARK: - Banner
@@ -407,6 +424,15 @@ public class YandexAdsPlugin extends Plugin {
             return;
         }
         activity.runOnUiThread(() -> {
+            // Загрузку могли закрыть, пока раннабл ждал очереди UI-потока
+            // (destroy, releaseAll после handleOnDestroy или следующий load):
+            // без guard'а здесь создавался бы лоадер на мёртвой activity,
+            // убирать который уже некому. Баннерный раннабл устроен так же.
+            if (pendingInterstitialLoadCall.get() != loadCall) return;
+            if (isActivityGone()) {
+                settleLoadCall(loadCall, false, "Activity is gone");
+                return;
+            }
             try {
                 if (interstitialLoader == null) {
                     // Один загрузчик на всё время жизни плагина - так советует
@@ -516,6 +542,10 @@ public class YandexAdsPlugin extends Plugin {
                     notifyAdEvent("interstitial", "dismissed", shownAdUnitId, null, null);
                     // Показанный объект переиспользовать нельзя - освобождаем.
                     releaseShowingInterstitial(ad);
+                    // Обычно обещание показа уже закрыто в onAdShown; страховка
+                    // на случай dismissed без shown (как у rewarded) - иначе
+                    // вызов ждал бы пятиминутного сторожа.
+                    settleOwnCall(pendingInterstitialShowCall, showCall, true, null);
                 }
 
                 @Override
@@ -587,6 +617,12 @@ public class YandexAdsPlugin extends Plugin {
             return;
         }
         activity.runOnUiThread(() -> {
+            // Тот же guard от закрытой загрузки, что у interstitial и баннера.
+            if (pendingRewardedLoadCall.get() != loadCall) return;
+            if (isActivityGone()) {
+                settleLoadCall(loadCall, false, "Activity is gone");
+                return;
+            }
             try {
                 if (rewardedLoader == null) {
                     rewardedLoader = new RewardedAdLoader(activity);

@@ -29,6 +29,9 @@ public class YandexAdsPlugin: CAPPlugin {
     // Инициализация уже идёт: второй init() должен ждать, а не поднимать SDK
     // повторно. Размер очереди для этого не годится - она пустеет по таймауту.
     private var isInitializing = false
+    // Событие init/loaded шлём ровно один раз, независимо от того, ждёт ли
+    // ещё кто-то ответа: игра по нему запускает предзагрузку.
+    private var isInitEventSent = false
     // Вызовы init(), ждущие ответа SDK. Именно список, а не одно поле: два
     // параллельных init() затирали бы друг друга, и первый не закрылся бы никогда.
     private var pendingInitCalls: [CAPPluginCall] = []
@@ -121,10 +124,15 @@ public class YandexAdsPlugin: CAPPlugin {
                     // SDK готов, даже если все вызовы уже закрылись по таймауту.
                     self.isInitialized = true
                     self.isInitializing = false
+                    // Событие - даже когда ждущих не осталось (SDK поднялся
+                    // после сторожа при медленной сети): игра запускает по нему
+                    // предзагрузку, без него реклама выглядела бы мёртвой.
+                    if !self.isInitEventSent {
+                        self.isInitEventSent = true
+                        self.notifyAdEvent(adType: "init", event: "loaded", adUnitId: nil, error: nil, reward: nil)
+                    }
                     let waiting = self.pendingInitCalls
                     self.pendingInitCalls.removeAll()
-                    guard !waiting.isEmpty else { return }
-                    self.notifyAdEvent(adType: "init", event: "loaded", adUnitId: nil, error: nil, reward: nil)
                     for pending in waiting { pending.resolve(["success": true]) }
                 }
             }
@@ -165,6 +173,7 @@ public class YandexAdsPlugin: CAPPlugin {
                 return
             }
             self.bannerLoadCallId = heldId
+            self.armLoadWatchdog(kind: "banner", heldId: heldId)
 
             // Старую вью убираем до guard'а на rootView: иначе при его провале
             // isBannerLoaded() отвечал бы true за баннер, чьи события уже
@@ -284,11 +293,17 @@ public class YandexAdsPlugin: CAPPlugin {
                 return
             }
             self.interstitialLoadCallId = heldId
+            self.armLoadWatchdog(kind: "interstitial", heldId: heldId)
 
             if self.interstitialLoader == nil { self.interstitialLoader = InterstitialAdLoader() }
             self.interstitialLoader?.loadAd(with: AdRequest(adUnitID: adUnitId)) { [weak self] result in
                 DispatchQueue.main.async { @MainActor in
                     guard let self = self else { return }
+                    // Загрузку могли вытеснить следующим loadInterstitial или
+                    // закрыть destroy/сторожем: поздний success резолвил бы
+                    // чужое обещание и подменял бы объявление, а поздний
+                    // failure - затирал бы уже загруженное (guard как на Android).
+                    guard self.interstitialLoadCallId == heldId else { return }
                     switch result {
                     case .success(let ad):
                         ad.delegate = self
@@ -312,13 +327,6 @@ public class YandexAdsPlugin: CAPPlugin {
             guard let self = self else { return }
             guard self.checkInitialized(call) else { return }
 
-            // Прошлый показ, не отчитавшийся ни одним колбэком, не должен
-            // блокировать рекламу до пятиминутного сторожа: вытесняем его, как
-            // это делает Android.
-            if self.showingInterstitialAd != nil {
-                self.showingInterstitialAd = nil
-                self.settleInterstitialShow(shown: false, message: "Superseded by a new showInterstitial() call")
-            }
             guard let ad = self.interstitialAd else {
                 self.resolveFail(call, "Interstitial not loaded")
                 return
@@ -330,6 +338,15 @@ public class YandexAdsPlugin: CAPPlugin {
             guard let heldId = self.hold(call) else {
                 self.resolveFail(call, "Bridge is gone")
                 return
+            }
+
+            // Прошлый показ, не отчитавшийся ни одним колбэком, не должен
+            // блокировать рекламу до пятиминутного сторожа: вытесняем его, как
+            // это делает Android. Строго ПОСЛЕ guard'ов: до них повторный вызов
+            // без предзагруженного ролика глушил бы делегатов ИДУЩЕГО показа.
+            if self.showingInterstitialAd != nil {
+                self.showingInterstitialAd = nil
+                self.settleInterstitialShow(shown: false, message: "Superseded by a new showInterstitial() call")
             }
 
             self.interstitialAd = nil
@@ -353,8 +370,10 @@ public class YandexAdsPlugin: CAPPlugin {
             guard let self = self else { return }
             self.interstitialAd = nil
             self.showingInterstitialAd = nil
-            // Делегата больше не будет - закрываем ждущее обещание показа.
+            // Делегата больше не будет - закрываем ждущие обещания показа и
+            // загрузки; поздний колбэк загрузчика отсечёт guard по heldId.
             self.settleInterstitialShow(shown: false, message: "Interstitial destroyed")
+            self.settle(&self.interstitialLoadCallId, with: ["success": false, "message": "Interstitial destroyed"])
             call.resolve(["success": true])
         }
     }
@@ -384,11 +403,15 @@ public class YandexAdsPlugin: CAPPlugin {
                 return
             }
             self.rewardedLoadCallId = heldId
+            self.armLoadWatchdog(kind: "rewarded", heldId: heldId)
 
             if self.rewardedLoader == nil { self.rewardedLoader = RewardedAdLoader() }
             self.rewardedLoader?.loadAd(with: AdRequest(adUnitID: adUnitId)) { [weak self] result in
                 DispatchQueue.main.async { @MainActor in
                     guard let self = self else { return }
+                    // Тот же guard от вытесненной/закрытой загрузки, что у
+                    // interstitial.
+                    guard self.rewardedLoadCallId == heldId else { return }
                     switch result {
                     case .success(let ad):
                         ad.delegate = self
@@ -412,10 +435,6 @@ public class YandexAdsPlugin: CAPPlugin {
             guard let self = self else { return }
             guard self.checkInitialized(call) else { return }
 
-            if self.showingRewardedAd != nil {
-                self.showingRewardedAd = nil
-                self.settleRewardedShow(shown: false, reward: nil, message: "Superseded by a new showRewarded() call")
-            }
             guard let ad = self.rewardedAd else {
                 self.resolveFail(call, "Rewarded ad not loaded")
                 return
@@ -427,6 +446,14 @@ public class YandexAdsPlugin: CAPPlugin {
             guard let heldId = self.hold(call) else {
                 self.resolveFail(call, "Bridge is gone")
                 return
+            }
+
+            // Вытесняем строго ПОСЛЕ guard'ов: иначе даблтап по кнопке без
+            // второго предзагруженного ролика глушил бы делегатов идущего
+            // показа, и досмотренная награда сгорала бы.
+            if self.showingRewardedAd != nil {
+                self.showingRewardedAd = nil
+                self.settleRewardedShow(shown: false, reward: nil, message: "Superseded by a new showRewarded() call")
             }
 
             // Награда прошлого показа не должна засчитаться этому.
@@ -455,6 +482,7 @@ public class YandexAdsPlugin: CAPPlugin {
             self.showingRewardedAd = nil
             self.lastRewardData = nil
             self.settleRewardedShow(shown: false, reward: nil, message: "Rewarded ad destroyed")
+            self.settle(&self.rewardedLoadCallId, with: ["success": false, "message": "Rewarded ad destroyed"])
             call.resolve(["success": true])
         }
     }
@@ -569,6 +597,28 @@ public class YandexAdsPlugin: CAPPlugin {
     }
 
     private static let showTimeout: TimeInterval = 5 * 60
+    private static let loadTimeout: TimeInterval = 60
+
+    /// Если SDK не ответит на загрузку ни успехом, ни ошибкой, обещание в JS
+    /// и вызов в saved calls висели бы вечно - на Android это armLoadWatchdog.
+    /// Сторож закрывает только свой вызов: к чужому heldId уже не подойдёт.
+    private func armLoadWatchdog(kind: String, heldId: String) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.loadTimeout) { [weak self] in
+            guard let self = self else { return }
+            let timeout: [String: Any] = ["success": false, "message": "Load timeout"]
+            switch kind {
+            case "banner":
+                guard self.bannerLoadCallId == heldId else { return }
+                self.settle(&self.bannerLoadCallId, with: timeout)
+            case "interstitial":
+                guard self.interstitialLoadCallId == heldId else { return }
+                self.settle(&self.interstitialLoadCallId, with: timeout)
+            default:
+                guard self.rewardedLoadCallId == heldId else { return }
+                self.settle(&self.rewardedLoadCallId, with: timeout)
+            }
+        }
+    }
 
     /// Отдаёт результат показа rewarded-ролика ровно один раз.
     ///
@@ -670,6 +720,9 @@ extension YandexAdsPlugin: InterstitialAdDelegate {
         // в interstitialAd при этом не трогаем: это уже следующее объявление.
         showingInterstitialAd = nil
         notifyAdEvent(adType: "interstitial", event: "dismissed", adUnitId: interstitialAdUnitId, error: nil, reward: nil)
+        // Обычно обещание показа уже закрыто в didShow; страховка на dismissed
+        // без shown - сторож привязан к объявлению и это обещание не закрыл бы.
+        settleInterstitialShow(shown: true, message: nil)
     }
 
     public func interstitialAdDidClick(_ interstitialAd: InterstitialAd) {
