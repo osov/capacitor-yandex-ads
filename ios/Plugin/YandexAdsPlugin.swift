@@ -166,6 +166,11 @@ public class YandexAdsPlugin: CAPPlugin {
             }
             self.bannerLoadCallId = heldId
 
+            // Старую вью убираем до guard'а на rootView: иначе при его провале
+            // isBannerLoaded() отвечал бы true за баннер, чьи события уже
+            // помечены новым adUnitId (эталон сбрасывал флаг первой строкой).
+            self.destroyBannerView()
+
             guard let rootView = self.bridge?.viewController?.view else {
                 // Вызов уже удержан - отвечаем через settle, иначе он останется
                 // в saved calls и разрешится второй раз.
@@ -173,8 +178,6 @@ public class YandexAdsPlugin: CAPPlugin {
                             with: ["success": false, "message": "Failed to get view controller"])
                 return
             }
-
-            self.destroyBannerView()
 
             // Семантика размеров - как у Defold-расширения: width и height -
             // inline этих размеров, только width - sticky этой ширины, без

@@ -254,16 +254,17 @@ public class YandexAdsPlugin extends Plugin {
                 BannerAdView view = new BannerAdView(activity);
 
                 // Семантика размеров - как у Defold-расширения: width и height
-                // задают фиксированный размер, только width - sticky этой
-                // ширины, без размера - стандартный баннер 320x50 (в SDK 8
-                // методы стали sticky/fixed и требуют контекст).
+                // задают inline-баннер до этих размеров (не fixed - эталон
+                // использовал inlineSize, креатив может быть ниже), только
+                // width - sticky этой ширины, без размера - стандартный
+                // 320x50 (в SDK 8 методы переименованы и требуют контекст).
                 BannerAdSize adSize;
                 if (width > 0 && height != null && height > 0)
-                    adSize = BannerAdSize.fixed(activity, width, height);
+                    adSize = BannerAdSize.inline(activity, width, height);
                 else if (width > 0)
                     adSize = BannerAdSize.sticky(activity, width);
                 else
-                    adSize = BannerAdSize.fixed(activity, 320, 50);
+                    adSize = BannerAdSize.inline(activity, 320, 50);
                 view.setAdSize(adSize);
 
                 applyBannerPosition(activity, position);
@@ -272,6 +273,11 @@ public class YandexAdsPlugin extends Plugin {
                     @Override
                     public void onAdLoaded() {
                         Log.d(TAG, "Banner loaded: " + adUnitId);
+                        // Загрузку мог вытеснить новый loadBanner, чей раннабл
+                        // ещё ждёт очереди main looper и слушателя не снял:
+                        // без проверки ушло бы фантомное событие со старым
+                        // adUnitId, а isBannerAdLoaded взводился бы впустую.
+                        if (pendingBannerLoadCall.get() != loadCall) return;
                         // Колбэк мог прийти после гибели activity - иначе утечка.
                         if (activity.isDestroyed()) {
                             destroyBannerView();
@@ -286,6 +292,8 @@ public class YandexAdsPlugin extends Plugin {
                     @Override
                     public void onAdFailedToLoad(@NonNull AdRequestError error) {
                         Log.e(TAG, "Banner failed to load: " + error.getDescription());
+                        // Тот же guard от вытесненной загрузки, что в onAdLoaded.
+                        if (pendingBannerLoadCall.get() != loadCall) return;
                         notifyAdEvent("banner", "failed_to_load", adUnitId, errorObject(error), null);
                         settleLoadCall(loadCall, false, error.getDescription());
                     }
