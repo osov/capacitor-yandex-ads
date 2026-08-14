@@ -9,6 +9,7 @@ import type {
   LoadInterstitialOptions,
   LoadRewardedOptions,
   RewardedAdResult,
+  ShowBannerOptions,
 } from './definitions';
 
 // implements обязателен: без него расхождение заглушки с интерфейсом плагина
@@ -24,7 +25,7 @@ export class YandexAdsWeb extends WebPlugin implements YandexAdsPlugin {
     return { success: false, message: 'Not available on web' };
   }
 
-  async showBanner(): Promise<AdResult> {
+  async showBanner(_options?: ShowBannerOptions): Promise<AdResult> {
     console.warn('YandexAds: showBanner() is not available on web platform');
     return { success: false, message: 'Not available on web' };
   }
@@ -32,6 +33,10 @@ export class YandexAdsWeb extends WebPlugin implements YandexAdsPlugin {
   async hideBanner(): Promise<AdResult> {
     console.warn('YandexAds: hideBanner() is not available on web platform');
     return { success: false, message: 'Not available on web' };
+  }
+
+  async isBannerLoaded(): Promise<AdLoadedResult> {
+    return { loaded: false };
   }
 
   async destroyBanner(): Promise<AdResult> {

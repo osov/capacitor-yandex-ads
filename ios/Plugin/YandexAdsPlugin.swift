@@ -38,6 +38,12 @@ public class YandexAdsPlugin: CAPPlugin {
     private var bannerAdUnitId: String?
     private var bannerPosition: String = "bottom"
     private var bannerLoadCallId: String?
+    // Констрейнты позиции держим отдельно: смена позиции у показанного
+    // баннера (showBanner(position)) снимает старые и вешает новые.
+    private var bannerConstraints: [NSLayoutConstraint] = []
+    // Вью появляется в начале загрузки, показывать можно только после
+    // didLoad - для isBannerLoaded() нужен отдельный флаг.
+    private var isBannerAdLoaded = false
 
     // Interstitial
     private var interstitialLoader: InterstitialAdLoader?
@@ -134,19 +140,14 @@ public class YandexAdsPlugin: CAPPlugin {
             resolveFail(call, "Missing required parameter: adUnitId")
             return
         }
-        guard let sizeObj = call.getObject("size") else {
-            resolveFail(call, "Missing required parameter: size")
-            return
-        }
+        // Размер необязателен, как у loadBanner в Defold-расширении: без него
+        // грузится стандартный баннер 320x50.
         // Через мост число приезжает как NSNumber: прямое приведение к Int
         // сорвалось бы на нецелом значении. intValue усекает дробную часть -
         // ровно как Number.intValue() на Android.
-        guard let width = (sizeObj["width"] as? NSNumber)?.intValue else {
-            resolveFail(call, "Missing required parameter: size.width")
-            return
-        }
-
-        let height = (sizeObj["height"] as? NSNumber)?.intValue
+        let sizeObj = call.getObject("size")
+        let width = (sizeObj?["width"] as? NSNumber)?.intValue ?? 0
+        let height = (sizeObj?["height"] as? NSNumber)?.intValue
         let position = call.getString("position") ?? "bottom"
 
         DispatchQueue.main.async { @MainActor [weak self] in
@@ -175,10 +176,17 @@ public class YandexAdsPlugin: CAPPlugin {
 
             self.destroyBannerView()
 
-            let containerWidth = width > 0 ? CGFloat(width) : rootView.bounds.width
-            let size: BannerAdSize = (height != nil && height! > 0)
-                ? BannerAdSize.inline(width: containerWidth, maxHeight: CGFloat(height!))
-                : BannerAdSize.sticky(containerWidth: containerWidth)
+            // Семантика размеров - как у Defold-расширения: width и height -
+            // inline этих размеров, только width - sticky этой ширины, без
+            // размера - стандартный баннер 320x50.
+            let size: BannerAdSize
+            if width > 0, let height = height, height > 0 {
+                size = BannerAdSize.inline(width: CGFloat(width), maxHeight: CGFloat(height))
+            } else if width > 0 {
+                size = BannerAdSize.sticky(containerWidth: CGFloat(width))
+            } else {
+                size = BannerAdSize.inline(width: 320, maxHeight: 50)
+            }
 
             let view = BannerAdView(adSize: size)
             view.delegate = self
@@ -195,6 +203,7 @@ public class YandexAdsPlugin: CAPPlugin {
     }
 
     @objc func showBanner(_ call: CAPPluginCall) {
+        let position = call.getString("position")
         DispatchQueue.main.async { @MainActor [weak self] in
             guard let self = self else { return }
             guard self.checkInitialized(call) else { return }
@@ -202,9 +211,22 @@ public class YandexAdsPlugin: CAPPlugin {
                 self.resolveFail(call, "Banner not loaded")
                 return
             }
+            // Позицию можно менять прямо при показе, в том числе у видимого
+            // баннера, - как show_banner(pos) в Defold-расширении.
+            if let position = position, let rootView = view.superview {
+                self.bannerPosition = position
+                self.applyBannerPosition(view, in: rootView)
+            }
             view.isHidden = false
             self.notifyAdEvent(adType: "banner", event: "shown", adUnitId: self.bannerAdUnitId, error: nil, reward: nil)
             call.resolve(["success": true])
+        }
+    }
+
+    @objc func isBannerLoaded(_ call: CAPPluginCall) {
+        DispatchQueue.main.async { @MainActor [weak self] in
+            guard let self = self else { return }
+            call.resolve(["loaded": self.isBannerAdLoaded])
         }
     }
 
@@ -439,13 +461,36 @@ public class YandexAdsPlugin: CAPPlugin {
     @MainActor
     private func attachBanner(_ view: BannerAdView, to rootView: UIView) {
         rootView.addSubview(view)
+        applyBannerPosition(view, in: rootView)
+    }
+
+    /// Позиции - тот же набор, что у Defold-расширения (getGravity): три
+    /// горизонтали сверху и снизу плюс центр. "top-center"/"bottom-center"
+    /// принимаем как синонимы "top"/"bottom".
+    @MainActor
+    private func applyBannerPosition(_ view: BannerAdView, in rootView: UIView) {
+        NSLayoutConstraint.deactivate(bannerConstraints)
         let guide = rootView.safeAreaLayoutGuide
-        var constraints: [NSLayoutConstraint] = [view.centerXAnchor.constraint(equalTo: guide.centerXAnchor)]
-        if bannerPosition.lowercased() == "top" {
+        let pos = bannerPosition.lowercased()
+        var constraints: [NSLayoutConstraint] = []
+
+        if pos.hasSuffix("-left") {
+            constraints.append(view.leadingAnchor.constraint(equalTo: guide.leadingAnchor))
+        } else if pos.hasSuffix("-right") {
+            constraints.append(view.trailingAnchor.constraint(equalTo: guide.trailingAnchor))
+        } else {
+            constraints.append(view.centerXAnchor.constraint(equalTo: guide.centerXAnchor))
+        }
+
+        if pos == "center" {
+            constraints.append(view.centerYAnchor.constraint(equalTo: guide.centerYAnchor))
+        } else if pos.hasPrefix("top") {
             constraints.append(view.topAnchor.constraint(equalTo: guide.topAnchor))
         } else {
             constraints.append(view.bottomAnchor.constraint(equalTo: guide.bottomAnchor))
         }
+
+        bannerConstraints = constraints
         NSLayoutConstraint.activate(constraints)
     }
 
@@ -454,6 +499,9 @@ public class YandexAdsPlugin: CAPPlugin {
     /// зарегистрированный вызов нельзя.
     @MainActor
     private func destroyBannerView() {
+        isBannerAdLoaded = false
+        NSLayoutConstraint.deactivate(bannerConstraints)
+        bannerConstraints = []
         bannerAdView?.delegate = nil
         bannerAdView?.removeFromSuperview()
         bannerAdView = nil
@@ -567,6 +615,7 @@ extension YandexAdsPlugin: BannerAdViewDelegate {
     public func bannerAdViewDidLoad(_ bannerAdView: BannerAdView) {
         // Колбэк мог прийти от вью, которую уже сменила следующая загрузка.
         guard bannerAdView === self.bannerAdView else { return }
+        isBannerAdLoaded = true
         notifyAdEvent(adType: "banner", event: "loaded", adUnitId: bannerAdUnitId, error: nil, reward: nil)
         settle(&bannerLoadCallId, with: ["success": true])
     }

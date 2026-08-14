@@ -1,6 +1,5 @@
 package com.osova.yandex.ads;
 
-import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -14,6 +13,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import android.os.Handler;
 import android.os.Looper;
 
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -84,6 +84,9 @@ public class YandexAdsPlugin extends Plugin {
     private volatile BannerAdView bannerAdView;
     private volatile LinearLayout bannerLayout;
     private volatile String bannerAdUnitId;
+    // Вью появляется в начале загрузки, а показывать баннер можно только после
+    // onAdLoaded - для isBannerLoaded() нужен отдельный флаг.
+    private volatile boolean isBannerAdLoaded = false;
 
     // Отложенные вызовы - в AtomicReference: "прочитать и обнулить" должно быть
     // одной операцией, иначе поток моста и UI-поток могут ответить дважды.
@@ -217,19 +220,12 @@ public class YandexAdsPlugin extends Plugin {
             return;
         }
 
+        // Размер необязателен, как у loadBanner в Defold-расширении: без него
+        // грузится стандартный баннер 320x50.
         JSObject sizeObj = call.getObject("size");
-        if (sizeObj == null) {
-            rejectMissingParameter(call, "size");
-            return;
-        }
-
-        Integer width = sizeObj.getInteger("width");
-        if (width == null) {
-            rejectMissingParameter(call, "size.width");
-            return;
-        }
-
-        Integer height = sizeObj.getInteger("height");
+        Integer widthValue = sizeObj != null ? sizeObj.getInteger("width") : null;
+        final int width = widthValue != null ? widthValue : 0;
+        Integer height = sizeObj != null ? sizeObj.getInteger("height") : null;
         String position = call.getString("position", "bottom");
 
         bannerAdUnitId = adUnitId;
@@ -257,11 +253,17 @@ public class YandexAdsPlugin extends Plugin {
 
                 BannerAdView view = new BannerAdView(activity);
 
-                // Размер считает сам SDK, и ему нужен контекст: методов
-                // stickySize/fixedSize без контекста в SDK 8 больше нет.
-                BannerAdSize adSize = (height != null && height > 0)
-                    ? BannerAdSize.fixed(activity, width, height)
-                    : BannerAdSize.sticky(activity, resolveStickyWidthDp(activity, width));
+                // Семантика размеров - как у Defold-расширения: width и height
+                // задают фиксированный размер, только width - sticky этой
+                // ширины, без размера - стандартный баннер 320x50 (в SDK 8
+                // методы стали sticky/fixed и требуют контекст).
+                BannerAdSize adSize;
+                if (width > 0 && height != null && height > 0)
+                    adSize = BannerAdSize.fixed(activity, width, height);
+                else if (width > 0)
+                    adSize = BannerAdSize.sticky(activity, width);
+                else
+                    adSize = BannerAdSize.fixed(activity, 320, 50);
                 view.setAdSize(adSize);
 
                 applyBannerPosition(activity, position);
@@ -276,6 +278,7 @@ public class YandexAdsPlugin extends Plugin {
                             settleLoadCall(loadCall, false, "Activity destroyed");
                             return;
                         }
+                        isBannerAdLoaded = true;
                         notifyAdEvent("banner", "loaded", adUnitId, null, null);
                         settleLoadCall(loadCall, true, null);
                     }
@@ -315,14 +318,22 @@ public class YandexAdsPlugin extends Plugin {
     public void showBanner(PluginCall call) {
         if (isGone(call)) return;
         if (notInitialized(call)) return;
-        setBannerVisible(call, true);
+        setBannerVisible(call, true, call.getString("position"));
     }
 
     @PluginMethod
     public void hideBanner(PluginCall call) {
         if (isGone(call)) return;
         if (notInitialized(call)) return;
-        setBannerVisible(call, false);
+        setBannerVisible(call, false, null);
+    }
+
+    @PluginMethod
+    public void isBannerLoaded(PluginCall call) {
+        if (isGone(call)) return;
+        JSObject ret = new JSObject();
+        ret.put("loaded", isBannerAdLoaded);
+        call.resolve(ret);
     }
 
     /**
@@ -330,7 +341,7 @@ public class YandexAdsPlugin extends Plugin {
      * destroyBanner()/loadBanner() успеет обнулить его до того, как выполнится
      * наш runnable. Поэтому берём ссылку уже на UI-потоке.
      */
-    private void setBannerVisible(PluginCall call, boolean isVisible) {
+    private void setBannerVisible(PluginCall call, boolean isVisible, @Nullable String position) {
         AppCompatActivity activity = getActivity();
         if (isActivityGone()) {
             resolveFail(call, "Activity is gone");
@@ -343,6 +354,9 @@ public class YandexAdsPlugin extends Plugin {
                 resolveFail(call, "Banner not loaded");
                 return;
             }
+            // Позицию можно менять прямо при показе, в том числе у видимого
+            // баннера, - как show_banner(pos) в Defold-расширении.
+            if (isVisible && position != null) applyBannerPosition(activity, position);
             view.setVisibility(isVisible ? View.VISIBLE : View.INVISIBLE);
             notifyAdEvent("banner", isVisible ? "shown" : "dismissed", bannerAdUnitId, null, null);
             resolveOk(call, null);
@@ -719,29 +733,47 @@ public class YandexAdsPlugin extends Plugin {
     // MARK: - Helpers
 
     /**
-     * Ширина sticky-баннера задаётся в dp. Ноль или отрицательное значение
-     * трактуем как "во всю ширину экрана".
+     * Позиции - как getGravity() в Defold-расширении: три горизонтали сверху
+     * и снизу плюс центр экрана. "top"/"bottom" - центральные варианты своих
+     * рядов; "top-center"/"bottom-center" принимаем как их синонимы.
      */
-    private int resolveStickyWidthDp(@NonNull AppCompatActivity activity, int requestedWidth) {
-        if (requestedWidth > 0) return requestedWidth;
-        DisplayMetrics metrics = activity.getResources().getDisplayMetrics();
-        return Math.round(metrics.widthPixels / metrics.density);
-    }
-
     private void applyBannerPosition(@NonNull AppCompatActivity activity, @Nullable String position) {
         FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) bannerLayout.getLayoutParams();
-        if ("top".equalsIgnoreCase(position)) {
-            params.gravity = Gravity.CENTER_HORIZONTAL | Gravity.TOP;
-            int statusBarHeight = 0;
-            int resourceId = activity.getResources().getIdentifier("status_bar_height", "dimen", "android");
-            if (resourceId > 0) {
-                statusBarHeight = activity.getResources().getDimensionPixelSize(resourceId);
-            }
-            params.topMargin = statusBarHeight;
-        } else {
-            params.gravity = Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM;
-            params.topMargin = 0;
+        String pos = position == null ? "bottom" : position.toLowerCase(Locale.ROOT);
+        int gravity;
+        switch (pos) {
+            case "top-left":
+                gravity = Gravity.TOP | Gravity.LEFT;
+                break;
+            case "top":
+            case "top-center":
+                gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+                break;
+            case "top-right":
+                gravity = Gravity.TOP | Gravity.RIGHT;
+                break;
+            case "bottom-left":
+                gravity = Gravity.BOTTOM | Gravity.LEFT;
+                break;
+            case "bottom-right":
+                gravity = Gravity.BOTTOM | Gravity.RIGHT;
+                break;
+            case "center":
+                gravity = Gravity.CENTER;
+                break;
+            default:
+                gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+                break;
         }
+        params.gravity = gravity;
+
+        // Верхний ряд опускаем под статусбар, иначе баннер лёг бы под вырез.
+        int topMargin = 0;
+        if ((gravity & Gravity.TOP) == Gravity.TOP) {
+            int resourceId = activity.getResources().getIdentifier("status_bar_height", "dimen", "android");
+            if (resourceId > 0) topMargin = activity.getResources().getDimensionPixelSize(resourceId);
+        }
+        params.topMargin = topMargin;
         bannerLayout.setLayoutParams(params);
     }
 
@@ -752,6 +784,7 @@ public class YandexAdsPlugin extends Plugin {
      * действительно обрывает загрузку, - destroyBanner() и releaseAll().
      */
     private void destroyBannerView() {
+        isBannerAdLoaded = false;
         BannerAdView view = bannerAdView;
         if (view == null) return;
         bannerAdView = null;

@@ -25,11 +25,20 @@ export enum AdEventType {
 }
 
 /**
- * Banner positions
+ * Banner positions.
+ *
+ * Тот же набор, что у Defold-расширения (POS_TOP_LEFT..POS_CENTER):
+ * три горизонтали сверху и снизу плюс центр экрана. TOP и BOTTOM - это
+ * центральные варианты своих рядов.
  */
 export enum BannerPosition {
+  TOP_LEFT = 'top-left',
   TOP = 'top',
+  TOP_RIGHT = 'top-right',
+  BOTTOM_LEFT = 'bottom-left',
   BOTTOM = 'bottom',
+  BOTTOM_RIGHT = 'bottom-right',
+  CENTER = 'center',
 }
 
 /**
@@ -157,11 +166,26 @@ export interface AdLoadedResult {
 }
 
 /**
- * Options for loading banner ads
+ * Options for loading banner ads.
+ *
+ * Семантика размера - как у loadBanner в Defold-расширении:
+ * width и height заданы - фиксированный размер, только width - sticky этой
+ * ширины, размер не задан (или width 0) - стандартный баннер 320x50.
  */
 export interface LoadBannerOptions {
   adUnitId: string;
-  size: BannerSize;
+  size?: BannerSize;
+  position?: BannerPosition;
+}
+
+/**
+ * Options for showing a loaded banner ad.
+ */
+export interface ShowBannerOptions {
+  /**
+   * Позицию можно менять при каждом показе, в том числе у уже видимого
+   * баннера, - как show_banner(pos) в Defold-расширении.
+   */
   position?: BannerPosition;
 }
 
@@ -216,15 +240,21 @@ export interface YandexAdsPlugin {
 
   /**
    * Show a loaded banner ad
+   * @param options - Optional position override, applied even while shown
    * @returns Promise that resolves when banner is shown
    */
-  showBanner(): Promise<AdResult>;
+  showBanner(options?: ShowBannerOptions): Promise<AdResult>;
 
   /**
    * Hide the banner ad
    * @returns Promise that resolves when banner is hidden
    */
   hideBanner(): Promise<AdResult>;
+
+  /**
+   * Whether a banner ad is loaded (its content arrived) and can be shown.
+   */
+  isBannerLoaded(): Promise<AdLoadedResult>;
 
   /**
    * Destroy the banner ad and free resources

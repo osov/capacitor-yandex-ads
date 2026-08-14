@@ -68,11 +68,15 @@ async function loadBanner() {
   try {
     const result = await YandexAds.loadBanner({
       adUnitId: 'YOUR_BANNER_AD_UNIT_ID',
+      // Optional. width+height = fixed size, width only = sticky of that
+      // width, omitted = standard 320x50 banner.
       size: {
         width: 320,
-        height: 50  // Optional: omit for adaptive height
+        height: 50
       },
-      position: 'bottom'  // 'top' or 'bottom'
+      // 'top-left' | 'top' | 'top-right' | 'bottom-left' | 'bottom' |
+      // 'bottom-right' | 'center' (default: 'bottom')
+      position: 'bottom'
     });
 
     if (result.success) {
@@ -83,10 +87,17 @@ async function loadBanner() {
   }
 }
 
-// Show the banner
+// Show the banner. The position can be changed on every show, even while
+// the banner is visible.
 async function showBanner() {
-  const result = await YandexAds.showBanner();
+  const result = await YandexAds.showBanner({ position: 'bottom-left' });
   console.log('Banner shown:', result.success);
+}
+
+// Whether the banner content has loaded and can be shown
+async function checkBanner() {
+  const { loaded } = await YandexAds.isBannerLoaded();
+  console.log('Banner loaded:', loaded);
 }
 
 // Hide the banner
@@ -366,24 +377,37 @@ Load a banner ad.
 
 **Parameters:**
 - `options.adUnitId: string` - Banner ad unit ID
-- `options.size: BannerSize` - Banner size configuration
+- `options.size?: BannerSize` - Banner size configuration
   - `width: number` - Banner width in dp
-  - `height?: number` - Banner height in dp (optional for adaptive)
-- `options.position?: 'top' | 'bottom'` - Banner position (default: 'bottom')
+  - `height?: number` - Banner height in dp
+  - width + height = fixed size, width only = sticky of that width,
+    omitted = standard 320x50 banner
+- `options.position?: BannerPosition` - Banner position (default: 'bottom'):
+  `'top-left' | 'top' | 'top-right' | 'bottom-left' | 'bottom' | 'bottom-right' | 'center'`
 
 **Returns:** `Promise<AdResult>`
 
 ---
 
-#### `showBanner(): Promise<AdResult>`
+#### `showBanner(options?: ShowBannerOptions): Promise<AdResult>`
 
 Show the loaded banner ad.
+
+**Parameters:**
+- `options.position?: BannerPosition` - Optional position override. Applied on
+  every show, even while the banner is visible.
 
 ---
 
 #### `hideBanner(): Promise<AdResult>`
 
 Hide the banner ad without destroying it.
+
+---
+
+#### `isBannerLoaded(): Promise<AdLoadedResult>`
+
+Whether the banner content has loaded and can be shown.
 
 ---
 

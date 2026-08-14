@@ -8,6 +8,7 @@ CAP_PLUGIN(YandexAdsPlugin, "YandexAds",
            CAP_PLUGIN_METHOD(loadBanner, CAPPluginReturnPromise);
            CAP_PLUGIN_METHOD(showBanner, CAPPluginReturnPromise);
            CAP_PLUGIN_METHOD(hideBanner, CAPPluginReturnPromise);
+           CAP_PLUGIN_METHOD(isBannerLoaded, CAPPluginReturnPromise);
            CAP_PLUGIN_METHOD(destroyBanner, CAPPluginReturnPromise);
            CAP_PLUGIN_METHOD(loadInterstitial, CAPPluginReturnPromise);
            CAP_PLUGIN_METHOD(showInterstitial, CAPPluginReturnPromise);
