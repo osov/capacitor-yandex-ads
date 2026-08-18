@@ -45,6 +45,14 @@ android {
 repositories {
     google()
     mavenCentral()
+    // Адаптеры медиации ironSource и Mintegral в Maven Central не
+    // публикуются. Адреса те же, что были в Defold-расширении игры.
+    //
+    // Одного объявления здесь мало: классы приложения Gradle разрешает
+    // репозиториями самого приложения, а не плагина, поэтому те же два адреса
+    // обязаны быть в корневом build.gradle приложения (allprojects).
+    maven { url "https://android-sdk.is.com/" }
+    maven { url "https://dl-maven-android.mintegral.com/repository/mbridge_android_sdk_oversea" }
 }
 
 
@@ -55,6 +63,29 @@ dependencies {
     // SDK 8 требует compileSdk 35+, minSdk 21+ и AGP 8.7+.
     // Если в приложении есть AppMetrica, её версия должна быть 8.3.0+.
     implementation 'com.yandex.android:mobileads:8.3.0'
+
+    // Медиация. Без адаптеров у SDK остаётся один источник спроса -
+    // собственный RTB Яндекса, и на одном рекламном блоке аукцион раз за разом
+    // выигрывает тот же креатив: баннер перезагружается, а картинка не
+    // меняется. Набор сетей и версии - как в Defold-расширении игры
+    // (defold-yandex-easy-monetization), там медиация работала с этим же
+    // SDK 8.3.0; версия адаптера повторяет версию SDK сети, последняя цифра -
+    // ревизия самого адаптера.
+    //
+    // Приложению с этими адаптерами обязательны meta-data в манифесте:
+    // com.google.android.gms.ads.APPLICATION_ID (без него Google-адаптер роняет
+    // процесс на старте) и applovin.sdk.key. Подробности в README.
+    //
+    // Лишнюю сеть приложение может выключить, не трогая плагин:
+    // configurations.all { exclude group: 'com.yandex.ads.mediation', module: '...' }
+    implementation 'com.yandex.ads.mediation:mobileads-google:25.2.0.2'
+    implementation 'com.yandex.ads.mediation:mobileads-unityads:4.17.0.3'
+    implementation 'com.yandex.ads.mediation:mobileads-applovin:13.6.3.0'
+    implementation 'com.yandex.ads.mediation:mobileads-ironsource:9.2.0.3'
+    implementation 'com.yandex.ads.mediation:mobileads-mintegral:17.0.41.3'
+    implementation 'com.yandex.ads.mediation:mobileads-bigoads:5.7.0.3'
+    implementation 'com.yandex.ads.mediation:mobileads-vungle:7.7.0.3'
+    implementation 'com.yandex.ads.mediation:mobileads-mytarget:5.45.3.4'
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"

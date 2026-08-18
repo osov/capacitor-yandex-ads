@@ -11,6 +11,7 @@ Capacitor plugin for integrating Yandex Mobile Ads SDK into your Ionic/Capacitor
 - ✅ Promise-based API for async/await support
 - ✅ TypeScript support with full type definitions
 - ✅ Android & iOS support
+- ✅ Mediation out of the box (Google, Unity Ads, AppLovin, ironSource, Mintegral, BigoADS, Vungle, myTarget)
 
 ## Installation
 
@@ -23,11 +24,100 @@ npx cap sync
 
 ### Android
 
-No additional configuration required. The plugin uses Yandex Mobile Ads SDK 5.4.0.
+The plugin uses Yandex Mobile Ads SDK **8.3.0** (`com.yandex.android:mobileads:8.3.0`)
+and ships the mediation adapters (see [Mediation](#mediation) — that section lists the
+two manifest entries and two Maven repositories the app must add).
+
+Requirements: `compileSdk` 35+, `minSdk` 21+, Android Gradle Plugin 8.7+.
+If the app also uses AppMetrica, its version must be **8.3.0+** — the ads SDK
+depends on `io.appmetrica.analytics:analytics:[8.3.0,9.0.0)`.
 
 ### iOS
 
-The plugin automatically adds YandexMobileAds SDK dependency via CocoaPods.
+The plugin automatically adds the YandexMobileAds SDK dependency (`~> 8.3`) and the
+mediation adapter pods via CocoaPods (see [Mediation](#mediation) — the app must add
+`GADApplicationIdentifier` to `Info.plist`).
+
+Requirements: Xcode 16.4+, deployment target iOS 13.0+.
+The SDK pins the AppMetrica pods to `~> 6.5.0`, so any AppMetrica plugin in the
+same app must stay inside that range.
+
+### Mediation
+
+The plugin depends on the Yandex mediation adapters, so the SDK can fill an ad
+slot from other networks instead of Yandex demand only. This matters most for
+banners: with a single demand source the same creative tends to win the auction
+over and over, so a banner that reloads every 30 seconds still shows the same
+picture.
+
+Bundled adapters (versioned after the network SDK they wrap, last digit is the
+adapter revision):
+
+| Network | Android | iOS |
+| --- | --- | --- |
+| Google (AdMob) | `mobileads-google:25.2.0.2` | `GoogleYandexMobileAdsAdapters` |
+| Unity Ads | `mobileads-unityads:4.17.0.3` | `UnityAdsYandexMobileAdsAdapters` |
+| AppLovin | `mobileads-applovin:13.6.3.0` | `AppLovinYandexMobileAdsAdapters` |
+| ironSource | `mobileads-ironsource:9.2.0.3` | `IronSourceYandexMobileAdsAdapters` |
+| Mintegral | `mobileads-mintegral:17.0.41.3` | `MintegralYandexMobileAdsAdapters` |
+| BigoADS | `mobileads-bigoads:5.7.0.3` | `BigoADSYandexMobileAdsAdapters` |
+| Vungle | `mobileads-vungle:7.7.0.3` | `VungleYandexMobileAdsAdapters` |
+| myTarget | `mobileads-mytarget:5.45.3.4` | `MyTargetYandexMobileAdsAdapters` |
+
+Enabling a network on the Yandex side (which adapter actually gets a bid) is done
+in the Partner Interface, not in code.
+
+#### Android — required app-side setup
+
+`ironSource` and `Mintegral` are not published to Maven Central. The plugin
+declares their repositories for its own module, but Gradle resolves the app's
+classpath with the **app's** repositories, so the root `android/build.gradle`
+needs them too:
+
+```gradle
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url "https://android-sdk.is.com/" }
+        maven { url "https://dl-maven-android.mintegral.com/repository/mbridge_android_sdk_oversea" }
+    }
+}
+```
+
+`AndroidManifest.xml` must carry the AdMob app id — the Google Mobile Ads SDK
+throws on startup without it — and the AppLovin SDK key:
+
+```xml
+<meta-data
+    android:name="com.google.android.gms.ads.APPLICATION_ID"
+    android:value="ca-app-pub-XXXXXXXXXXXXXXXX~YYYYYYYYYY" />
+<meta-data
+    android:name="applovin.sdk.key"
+    android:value="YOUR_APPLOVIN_SDK_KEY" />
+```
+
+To drop a network without touching the plugin:
+
+```gradle
+configurations.all {
+    exclude group: 'com.yandex.ads.mediation', module: 'mobileads-mintegral'
+}
+```
+
+#### iOS — required app-side setup
+
+`Info.plist` needs the AdMob app id (same reason as on Android) and the
+SKAdNetwork identifier list published by Yandex
+(<https://yastatic.net/pcode-static/skadnetwork/skadids.json>):
+
+```xml
+<key>GADApplicationIdentifier</key>
+<string>ca-app-pub-XXXXXXXXXXXXXXXX~YYYYYYYYYY</string>
+```
+
+The plugin does not request App Tracking Transparency; without it the SDK and
+the adapters run in non-personalized mode.
 
 ## Usage
 

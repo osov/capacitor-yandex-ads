@@ -19,5 +19,23 @@ Pod::Spec.new do |s|
   # SDK 8 требует Xcode 16.4+. Он же тянет AppMetricaCore ~> 6.5.0, поэтому
   # плагин аналитики не должен требовать более новую мажорную версию AppMetrica.
   s.dependency 'YandexMobileAds', '~> 8.3'
+  # Медиация. Без адаптеров у SDK остаётся один источник спроса - собственный
+  # RTB Яндекса, и на одном рекламном блоке аукцион раз за разом выигрывает тот
+  # же креатив. Набор сетей - как в Podfile Defold-расширения игры.
+  #
+  # Версии не закрепляем: адаптер нумеруется по версии SDK своей сети, а
+  # совместимость с YandexMobileAds каждый из них объявляет сам - CocoaPods
+  # подберёт набор под резолвнутую версию SDK.
+  #
+  # Приложению с Google-адаптером обязателен GADApplicationIdentifier в
+  # Info.plist: без него Google Mobile Ads SDK падает на старте.
+  s.dependency 'GoogleYandexMobileAdsAdapters'
+  s.dependency 'UnityAdsYandexMobileAdsAdapters'
+  s.dependency 'AppLovinYandexMobileAdsAdapters'
+  s.dependency 'IronSourceYandexMobileAdsAdapters'
+  s.dependency 'MintegralYandexMobileAdsAdapters'
+  s.dependency 'MyTargetYandexMobileAdsAdapters'
+  s.dependency 'VungleYandexMobileAdsAdapters'
+  s.dependency 'BigoADSYandexMobileAdsAdapters'
   s.swift_version = '5.9'
 end
