@@ -518,7 +518,12 @@ public class YandexAdsPlugin: CAPPlugin {
         } else if pos.hasPrefix("top") {
             constraints.append(view.topAnchor.constraint(equalTo: guide.topAnchor))
         } else {
-            constraints.append(view.bottomAnchor.constraint(equalTo: guide.bottomAnchor))
+            // Низ - к краю вью, а не к безопасной зоне: там полоса home
+            // indicator (на iPhone 14 это 34 pt), и баннер висел бы над ней,
+            // перекрывая содержимое сильнее, чем на Android, где такого
+            // отступа нет вовсе. Верх и горизонталь остаются в safe area:
+            // сверху вырез и статусбар, а в портрете боковые инсеты нулевые.
+            constraints.append(view.bottomAnchor.constraint(equalTo: rootView.bottomAnchor))
         }
 
         bannerConstraints = constraints
